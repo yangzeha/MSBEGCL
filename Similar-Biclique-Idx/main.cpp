@@ -5261,11 +5261,11 @@ void check_results(vector<pair<vector<ui>, vector<ui>>> r)
 
 void print_results()
 {
-    cout<<"Results : "<<endl;
+    // Modified for compatibility with SELFRec parser (Single line, space separated IDs)
     for(auto e : results) {
-        cout<<"\tCL : "; for(auto x : e.first) cout<<x<<", "; cout<<endl;
-        cout<<"\tCR : "; for(auto x : e.second) cout<<x<<", "; cout<<endl;
-        cout<<"\t----------------------------------------"<<endl;
+        for(auto x : e.first) cout<<x<<" ";
+        for(auto x : e.second) cout<<x<<" ";
+        cout<<endl;
     }
 }
 
