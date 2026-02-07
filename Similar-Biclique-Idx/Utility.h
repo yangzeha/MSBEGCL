@@ -30,7 +30,6 @@
 //#define NDEBUG
 #include <assert.h>
 #include <sparsehash/dense_hash_map>
-
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -47,7 +46,7 @@ const int INF = 1000000000;
 //#define _SHRINK_
 //#define _JSUB_
 #define _CheckResults_
-//#define _PrintResults_
+#define _PrintResults_
 //#define _CaseStudy_
 
 
