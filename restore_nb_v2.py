@@ -203,7 +203,7 @@ else:
 # 6. Run Mining
 print('\n--- Mining Bicliques ---')
 # Parameters from yaml or paper defaults
-sim_threshold = 0.2  # epsilon (Lowered further to 0.2 to capture more bicliques)
+sim_threshold = 0.1  # epsilon (Lowered to 0.1 to capture more bicliques)
 size_threshold = 2   # tau
 
 if os.path.exists(msbe_exe) and os.path.exists(mining_graph_txt):
