@@ -166,6 +166,13 @@ else:
 
     sorted_users = sorted(list(users))
     sorted_items = sorted(list(items))
+    # Try numeric sort if possible to align with potential integer IDs
+    try:
+        sorted_users = sorted(list(users), key=lambda x: int(x))
+        sorted_items = sorted(list(items), key=lambda x: int(x))
+    except:
+        pass
+
     u_map = {u: idx for idx, u in enumerate(sorted_users)}
     i_map = {i: idx for idx, i in enumerate(sorted_items)}
 
