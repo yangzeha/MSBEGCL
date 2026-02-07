@@ -132,18 +132,6 @@ if not os.path.exists(sparsez_dir):
     finally:
         os.chdir(cwd_backup)
 
-# Compile edgelist2binary
-edgelist2binary_src = os.path.join(msbe_path, 'datasets', 'edgelist2binary.cpp')
-edgelist2binary_exe = './edgelist2binary'
-
-if not os.path.exists(edgelist2binary_src):
-    print(f"CRITICAL ERROR: Source file {edgelist2binary_src} not found!")
-else:
-    # Ensure execution permissions for compiled file
-    subprocess.run(['g++', '-O3', edgelist2binary_src, '-o', edgelist2binary_exe], check=True)
-    subprocess.run(['chmod', '+x', edgelist2binary_exe])
-    print('edgelist2binary compiled.')
-
 # Compile msbe
 msbe_src = os.path.join(msbe_path, 'main.cpp')
 msbe_exe = './msbe'
@@ -193,12 +181,52 @@ else:
 
     print(f'Generated {mining_graph_txt} with {n1} users, {n2} items, {len(edges)} edges.')
 
-    # Convert to Binary
-    if os.path.exists(edgelist2binary_exe):
-        subprocess.run([edgelist2binary_exe, mining_graph_txt], check=True)
-        # Expected outputs: graph_b_degree.bin, graph_b_adj.bin
-    else:
-         print("Skipping binary conversion due to compilation failure.")
+    # Python-based Binary Generation (Imitating ai_project logic)
+    import struct
+    
+    # 1. Build Adjacency List (Undirected/Bipartite)
+    # n1 users [0, n1-1], n2 items [n1, n1+n2-1]
+    total_nodes = n1 + n2
+    adj = [[] for _ in range(total_nodes)]
+    edge_count = 0
+    
+    for u, i in edges:
+        uid = u_map[u]
+        iid = i_map[i] + n1
+        
+        # Add undirected edge
+        adj[uid].append(iid)
+        adj[iid].append(uid)
+        edge_count += 2
+        
+    # Sort adjacency lists (MSBE requirement)
+    for k in range(total_nodes):
+        adj[k].sort()
+        
+    # 2. Write _b_degree.bin
+    degree_file = 'graph_b_degree.bin'
+    with open(degree_file, 'wb') as f:
+        f.write(struct.pack('I', 4)) # sizeof(ui)
+        f.write(struct.pack('I', n1))
+        f.write(struct.pack('I', n2))
+        f.write(struct.pack('I', edge_count))
+        
+        degrees = [len(adj[k]) for k in range(total_nodes)]
+        f.write(struct.pack(f'{total_nodes}I', *degrees))
+        
+    # 3. Write _b_adj.bin
+    adj_file = 'graph_b_adj.bin'
+    with open(adj_file, 'wb') as f:
+        flat_adj = []
+        for k in range(total_nodes):
+            flat_adj.extend(adj[k])
+        f.write(struct.pack(f'{edge_count}I', *flat_adj))
+        
+    print(f"Generated binary graph files: {degree_file}, {adj_file}")
+    
+    # Create dummy text file to satisfy MSBE input check
+    with open(mining_graph_txt, 'w') as f:
+        f.write("dummy")
 
 # 6. Run Mining
 print('\n--- Mining Bicliques ---')
