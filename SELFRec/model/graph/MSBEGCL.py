@@ -80,28 +80,47 @@ class MSBEGCL(GraphRecommender):
         u_batch = list(set(idx[0]))
         i_batch = list(set(idx[1]))
         
-        pos_u = []
-        for u in u_batch:
-            if u in self.user_neighbors and self.user_neighbors[u]:
-                pos_u.append(random.choice(self.user_neighbors[u]))
-            else:
-                pos_u.append(u)
+        def build_pairs(batch_nodes, neighbor_dict):
+            anchors = []
+            positives = []
+            for u in batch_nodes:
+                nbs = neighbor_dict.get(u, [])
+                if nbs:
+                    curr_nbs = nbs if len(nbs) <= 20 else random.sample(nbs, 20)
+                    for v in curr_nbs:
+                        anchors.append(u)
+                        positives.append(v)
+                else:
+                    anchors.append(u)
+                    positives.append(u)
+            return anchors, positives
+
+        u_anchors, u_pos = build_pairs(u_batch, self.user_neighbors)
+        i_anchors, i_pos = build_pairs(i_batch, self.item_neighbors)
+
+        u_anchors_idx = torch.LongTensor(u_anchors).cuda()
+        u_pos_idx = torch.LongTensor(u_pos).cuda()
+        i_anchors_idx = torch.LongTensor(i_anchors).cuda()
+        i_pos_idx = torch.LongTensor(i_pos).cuda()
         
-        pos_i = []
-        for i in i_batch:
-            if i in self.item_neighbors and self.item_neighbors[i]:
-                pos_i.append(random.choice(self.item_neighbors[i]))
-            else:
-                pos_i.append(i)
-        
-        u_idx = torch.LongTensor(u_batch).cuda()
-        pos_u_idx = torch.LongTensor(pos_u).cuda()
-        i_idx = torch.LongTensor(i_batch).cuda()
-        pos_i_idx = torch.LongTensor(pos_i).cuda()
-        
+        u_neg_idx = torch.LongTensor(u_batch).cuda()
+        i_neg_idx = torch.LongTensor(i_batch).cuda()
+
         user_view, item_view = self.model(view='global', perturbed=True)
         
-        return InfoNCE(user_view[u_idx], user_view[pos_u_idx], 0.2) + InfoNCE(item_view[i_idx], item_view[pos_i_idx], 0.2)
+        def batch_nce(anchors, positives, neg_pool, temp=0.2):
+            anchors = F.normalize(anchors, dim=1)
+            positives = F.normalize(positives, dim=1)
+            neg_pool = F.normalize(neg_pool, dim=1)
+            pos_logits = (anchors * positives).sum(dim=1, keepdim=True) / temp
+            neg_logits = torch.mm(anchors, neg_pool.t()) / temp
+            all_logits = torch.cat([pos_logits, neg_logits], dim=1)
+            return -F.log_softmax(all_logits, dim=1)[:, 0].mean()
+
+        loss_u = batch_nce(user_view[u_anchors_idx], user_view[u_pos_idx], user_view[u_neg_idx])
+        loss_i = batch_nce(item_view[i_anchors_idx], item_view[i_pos_idx], item_view[i_neg_idx])
+        
+        return loss_u + loss_i
 
     def save(self):
         with torch.no_grad():
