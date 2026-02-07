@@ -5261,9 +5261,10 @@ void check_results(vector<pair<vector<ui>, vector<ui>>> r)
 
 void print_results()
 {
-    // Modified for compatibility with SELFRec parser (Single line, space separated IDs)
+    // Modified for compatibility with SELFRec parser (Separator | betwen users and items)
     for(auto e : results) {
         for(auto x : e.first) cout<<x<<" ";
+        cout<<"| ";
         for(auto x : e.second) cout<<x<<" ";
         cout<<endl;
     }

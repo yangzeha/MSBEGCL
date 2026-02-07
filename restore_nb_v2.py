@@ -257,26 +257,20 @@ if os.path.exists('bicliques_raw.txt'):
             if not line:
                 continue
             
-            # Line format: "CL : 123, 456," or "CL : 123, 456"
-            if line.startswith('CL :') or line.startswith('CL:'):
-                # Clean and parse string (remove "CL :")
+            # Format: u1 u2 ... | i1 i2 ...
+            if '|' in line:
                 try:
-                    content = line.split(':', 1)[1]
-                    tokens = content.replace(',', ' ').split()
-                    current_users = [int(x) for x in tokens if x.isdigit()]
-                except IndexError:
-                    pass
-                continue
-                
-            if line.startswith('CR :') or line.startswith('CR:'):
-                try:
-                    content = line.split(':', 1)[1]
-                    tokens = content.replace(',', ' ').split()
-                    current_items = [int(x) for x in tokens if x.isdigit()]
-                except IndexError:
-                    pass
-                
-                # We have a pair now (assuming CL comes before CR and we just read CR)
+                    parts = line.split('|')
+                    if len(parts) >= 2:
+                        u_part = parts[0].strip()
+                        i_part = parts[1].strip()
+                        current_users = [int(x) for x in u_part.split() if x.isdigit()]
+                        current_items = [int(x) for x in i_part.split() if x.isdigit()]
+                    else:
+                        continue
+                except ValueError:
+                    continue
+
                 if len(current_users) > 0 and len(current_items) > 0:
                     real_users = []
                     real_items = []
