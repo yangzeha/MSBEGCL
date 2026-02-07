@@ -303,9 +303,11 @@ if os.path.exists('bicliques_raw.txt'):
                 
     print(f"Processed {count} bicliques into {final_biclique_path}")
     
-    # [Robustness] Verify output content and create dummy if needed
+    # [Robustness] Verify output content
     if count == 0:
-         print("ERROR: No bicliques were extracted! Stopping execution as requested.")
+         print("CRITICAL ERROR: No bicliques were extracted (count == 0).")
+         print("Check sim_threshold (epsilon) or data preprocessing.")
+         print("Terminating execution as requested.")
          sys.exit(1)
 else:
     print("Warning: bicliques_raw.txt not found.")
