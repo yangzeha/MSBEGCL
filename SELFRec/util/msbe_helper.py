@@ -71,41 +71,23 @@ def load_msbe_adj(file_path, user_map, item_map, user_num, item_num):
     
     return norm_adj
 
-def load_msbe_neighbors(file_path, user_map, item_map):
+def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None):
     """
     Load neighbor dictionaries from bicliques.
+    Sorts neighbors by interaction similarity (Cosine Similarity).
     Returns:
-        user_neighbors: dict {userid: [similar_userid_1, ...]}
-        item_neighbors: dict {itemid: [similar_itemid_1, ...]}
+        user_neighbors: dict {userid: [most_similar_uid, ...]}
+        item_neighbors: dict {itemid: [most_similar_iid, ...]}
     """
     if not os.path.exists(file_path):
         return {}, {}
     
-    user_neighbors = {}
-    item_neighbors = {}
+    # 1. Collect biclique members (assuming disjoint or overlapping is fine, we just collect candidates)
+    # User said: "User will only appear in one maximal similar biclique" (Strict Partition? Or disjoint)
+    # We will assume they are grouped.
     
-    with open(file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line: continue
-            
-            if '|' in line: parts = line.split('|')
-            elif ':' in line: parts = line.split(':')
-            else: continue
-                
-            if len(parts) != 2: continue
-            
-            u_part = parts[0].strip().split()
-            i_part = parts[1].strip().split()
-            
-            # Build User-User connections (Clique expansion)
-            # Count frequency to determine similarity strength
-            # Frequency = How many bicliques do they share?
-            pass # We first need to collect raw edges then process frequency
-
-    # Re-scan to build weighted graph
-    user_pair_counts = {} # (u, v) -> count
-    item_pair_counts = {} # (i, j) -> count
+    user_candidates = {} # u -> set of neighbors
+    item_candidates = {} # i -> set of neighbors
     
     with open(file_path, 'r') as f:
         for line in f:
@@ -122,43 +104,96 @@ def load_msbe_neighbors(file_path, user_map, item_map):
             u_ids = [user_map.get(u) for u in u_part if u in user_map]
             i_ids = [item_map.get(i) for i in i_part if i in item_map]
             
+            # Map every node to all other nodes in the same clique
             if len(u_ids) > 1:
-                u_ids.sort()
-                for idx1 in range(len(u_ids)):
-                    for idx2 in range(idx1 + 1, len(u_ids)):
-                        pair = (u_ids[idx1], u_ids[idx2])
-                        user_pair_counts[pair] = user_pair_counts.get(pair, 0) + 1
-                        
+                for u in u_ids:
+                    if u not in user_candidates: user_candidates[u] = set()
+                    for v in u_ids:
+                        if u != v:
+                            user_candidates[u].add(v)
+                            
             if len(i_ids) > 1:
-                i_ids.sort()
-                for idx1 in range(len(i_ids)):
-                    for idx2 in range(idx1 + 1, len(i_ids)):
-                        pair = (i_ids[idx1], i_ids[idx2])
-                        item_pair_counts[pair] = item_pair_counts.get(pair, 0) + 1
+                for i in i_ids:
+                    if i not in item_candidates: item_candidates[i] = set()
+                    for j in i_ids:
+                        if i != j:
+                            item_candidates[i].add(j)
 
-    # Convert counts to sorted adjacency lists
-    user_neighbors = {}
-    for (u, v), count in user_pair_counts.items():
-        if u not in user_neighbors: user_neighbors[u] = []
-        if v not in user_neighbors: user_neighbors[v] = []
-        user_neighbors[u].append((v, count))
-        user_neighbors[v].append((u, count))
+    # 2. Sort neighbors by Cosine Similarity on Interaction Matrix
+    print("Calculating similarities for neighbor ranking...")
+    
+    # Helper for fast cosine similarity between one row and many rows
+    def sort_by_similarity(candidates_dict, mat, transpose=False):
+        final_dict = {}
+        # Pre-compute norms if possible, or computing on the fly
+        # mat is sparse csr
+        # For item similarity, we need columns. If transpose=False (user), mat is U x I.
+        # If transpose=True (item), we want Cosine(Col_i, Col_j).
+        # Better to transpose matrix once for items.
         
-    item_neighbors = {}
-    for (i, j), count in item_pair_counts.items():
-        if i not in item_neighbors: item_neighbors[i] = []
-        if j not in item_neighbors: item_neighbors[j] = []
-        item_neighbors[i].append((j, count))
-        item_neighbors[j].append((i, count))
+        target_mat = mat.T if transpose else mat
+        # Ensure CSR for fast slicing
+        target_mat = target_mat.tocsr()
+        
+        # Norms
+        # row norms: sqrt(sum(x^2))
+        inv_norms = np.array(np.sqrt(target_mat.multiply(target_mat).sum(axis=1))).flatten()
+        with np.errstate(divide='ignore'):
+            inv_norms = 1.0 / inv_norms
+        inv_norms[np.isinf(inv_norms)] = 0.0
+        
+        # Process each node
+        processed = 0
+        total = len(candidates_dict)
+        
+        for node_id, neighbors_set in candidates_dict.items():
+            if not neighbors_set:
+                final_dict[node_id] = []
+                continue
+                
+            neighbors = list(neighbors_set)
+            
+            # Vectorized Sim Calculation: 
+            # query_vec * neighbors_matrix.T
+            
+            # 1. Get query vector
+            q_vec = target_mat[node_id]
+            q_norm = inv_norms[node_id]
+            
+            if q_vec.nnz == 0:
+                final_dict[node_id] = neighbors # random order
+                continue
+            
+            # 2. Get neighbors submatrix
+            # Using fancy indexing might be slow if list is long, but here it's small (clique size)
+            nb_indices = neighbors
+            nb_mat = target_mat[nb_indices]
+            
+            if nb_mat.nnz == 0:
+                final_dict[node_id] = neighbors
+                continue
+                
+            # 3. Dot product
+            # (1 x F) * (K x F)^T -> (1 x K)
+            dot_prods = q_vec.dot(nb_mat.T).toarray().flatten()
+            
+            # 4. Normalize
+            nb_norms = inv_norms[nb_indices]
+            sims = dot_prods * q_norm * nb_norms
+            
+            # 5. Sort
+            # Zip and sort descending
+            sorted_pairs = sorted(zip(neighbors, sims), key=lambda x: x[1], reverse=True)
+            final_dict[node_id] = [p[0] for p in sorted_pairs]
+            
+            processed += 1
+            if processed % 5000 == 0:
+                print(f"Processed {processed}/{total} nodes...")
+                
+        return final_dict
 
-    # Sort by count (descending) and stripe counts
-    for u in user_neighbors:
-        user_neighbors[u].sort(key=lambda x: x[1], reverse=True)
-        user_neighbors[u] = [x[0] for x in user_neighbors[u]]
-        
-    for i in item_neighbors:
-        item_neighbors[i].sort(key=lambda x: x[1], reverse=True)
-        item_neighbors[i] = [x[0] for x in item_neighbors[i]]
+    user_neighbors = sort_by_similarity(user_candidates, interaction_mat, transpose=False)
+    item_neighbors = sort_by_similarity(item_candidates, interaction_mat, transpose=True)
     
     return user_neighbors, item_neighbors
 

@@ -29,7 +29,8 @@ class MSBEGCL(GraphRecommender):
         self.user_neighbors, self.item_neighbors = load_msbe_neighbors(
             self.biclique_file,
             self.data.user,
-            self.data.item
+            self.data.item,
+            self.data.interaction_mat
         )
         
         self.model = MSBEGCL_Encoder(
