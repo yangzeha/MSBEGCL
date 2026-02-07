@@ -53,16 +53,15 @@ class MSBEGCL(GraphRecommender):
                 
                 rec_loss = bpr_loss(user_emb, pos_item_emb, neg_item_emb)
                 
-                cl_loss_noise = self.cl_rate * self.cal_cl_loss_noise([user_idx, pos_idx])
                 cl_loss_msbe = self.msbe_rate * self.cal_cl_loss_msbe([user_idx, pos_idx])
                 
-                batch_loss = rec_loss + l2_reg_loss(self.reg, user_emb, pos_item_emb) + cl_loss_noise + cl_loss_msbe
+                batch_loss = rec_loss + l2_reg_loss(self.reg, user_emb, pos_item_emb) + cl_loss_msbe
                 
                 optimizer.zero_grad()
                 batch_loss.backward()
                 optimizer.step()
                 if n % 100 == 0 and n > 0:
-                    print('training:', epoch + 1, 'batch', n, 'rec_loss:', rec_loss.item(), 'cl_noise:', cl_loss_noise.item(), 'cl_msbe:', cl_loss_msbe.item())
+                    print('training:', epoch + 1, 'batch', n, 'rec_loss:', rec_loss.item(), 'cl_msbe:', cl_loss_msbe.item())
             
             with torch.no_grad():
                 self.user_emb, self.item_emb = self.model(view='global')
@@ -106,6 +105,12 @@ class MSBEGCL(GraphRecommender):
         u_neg_idx = torch.LongTensor(u_batch).cuda()
         i_neg_idx = torch.LongTensor(i_batch).cuda()
 
+        # [Modified]: Only perturb if it's a self-contrast case (fallback)
+        # But since we use one unified batch_nce, we can just use perturbed=True consistently
+        # to ensure robust features, OR use perturbed=False if we want pure structure learning.
+        # User request: "Remove cl_loss_noise... use self as positive only if no neighbors".
+        # This implies standard embedding for neighbors, but for self-loop maybe we need noise to avoid trivial solution?
+        # Let's stick to perturbed=True for robust CL, but remove the explicit cl_loss_noise term as requested.
         user_view, item_view = self.model(view='global', perturbed=True)
         
         def batch_nce(anchors, positives, neg_pool, temp=0.2):
