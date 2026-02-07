@@ -285,43 +285,35 @@ if os.path.exists('bicliques_raw.txt'):
             if not line:
                 continue
             
-            # Format: u1 u2 ... | i1 i2 ...
-            if '|' in line:
-                try:
-                    parts = line.split('|')
-                    if len(parts) >= 2:
-                        u_part = parts[0].strip()
-                        i_part = parts[1].strip()
-                        current_users = [int(x) for x in u_part.split() if x.isdigit()]
-                        current_items = [int(x) for x in i_part.split() if x.isdigit()]
-                    else:
-                        continue
-                except ValueError:
-                    continue
-
-                if len(current_users) > 0 and len(current_items) > 0:
-                    real_users = []
-                    real_items = []
-                    
-                    for uid in current_users:
-                        if uid < n1:
-                             real_users.append(sorted_users[uid])
-                    
-                    for iid in current_items:
-                        # Raw item ID is encoded as iid (>= n1 usually in the combined graph)
-                        # So items valid are [n1, n1+n2-1]
-                        if iid >= n1:
-                            raw_iid = iid - n1
-                            if raw_iid < n2:
-                                real_items.append(sorted_items[raw_iid])
-                    
-                    if len(real_users) > 0 and len(real_items) > 0:
-                        fw.write(f"{' '.join(real_users)} | {' '.join(real_items)}\n")
-                        count += 1
+            # Universal Parser: Handle both pipe-separated and plain space-separated
+            # Robust logic: We know n1 (num users). Any ID < n1 is user, >= n1 is item.
+            
+            # 1. Normalize separators
+            clean_line = line.replace('|', ' ').replace(',', ' ')
+            tokens = clean_line.split()
+            
+            current_users = []
+            current_items = []
+            
+            for t in tokens:
+                if not t.isdigit(): continue
+                nid = int(t)
                 
-                # Reset
-                current_users = []
-                current_items = []
+                if nid < n1:
+                    if nid in sorted_users: 
+                        current_users.append(sorted_users[nid])
+                else:
+                    # Item IDs are offset by n1
+                    iid = nid - n1
+                    if iid >= 0 and iid < n2:
+                        current_items.append(sorted_items[iid])
+            
+            # Only write if we have both users and items (valid biclique)
+            if len(current_users) > 0 and len(current_items) > 0:
+                fw.write(f"{' '.join(current_users)} | {' '.join(current_items)}\n")
+                count += 1
+                
+        # End loop
                 
     print(f"Processed {count} bicliques into {final_biclique_path}")
     
