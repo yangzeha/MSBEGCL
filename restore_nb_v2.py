@@ -329,10 +329,12 @@ else:
     import re
     
     conf_content = re.sub(r'biclique\.file:.*', f'biclique.file: {new_path}', conf_content)
+    # Increase epochs to ensure convergence
+    conf_content = re.sub(r'max\.epoch:.*', 'max.epoch: 60', conf_content)
 
     with open(conf_path, 'w') as f:
         f.write(conf_content)
-    print("Updated MSBEGCL.yaml with correct biclique path.")
+    print("Updated MSBEGCL.yaml with correct biclique path and max.epoch=60.")
 
 # 9. Run MSBEGCL
 print('\n--- Starting Traning ---')
