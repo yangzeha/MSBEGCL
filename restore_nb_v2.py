@@ -151,7 +151,7 @@ if not os.path.exists(msbe_src):
     print(f"CRITICAL ERROR: Source file {msbe_src} not found!")
 else:
     # Added -I sparsehash/src to include path
-    subprocess.run(['g++', '-O3', msbe_src, '-o', msbe_exe, '-I', msbe_path, '-I', 'sparsehash/src', '-D_PrintResults_'], check=True)
+    subprocess.run(['g++', '-O3', msbe_src, '-o', msbe_exe, '-I', msbe_path, '-I', 'sparsehash/src', '-D_PrintResults_', '-D_CheckResults_'], check=True)
     subprocess.run(['chmod', '+x', msbe_exe])
     print('msbe compiled.')
 
@@ -305,12 +305,8 @@ if os.path.exists('bicliques_raw.txt'):
     
     # [Robustness] Verify output content and create dummy if needed
     if count == 0:
-         print("WARNING: No bicliques were extracted! Creating a dummy biclique to prevent crash.")
-         with open(final_biclique_path, 'w') as fw:
-             # Create a dummy biclique with user 0 and item 0
-             if len(sorted_users) > 0 and len(sorted_items) > 0:
-                 fw.write(f"{sorted_users[0]} | {sorted_items[0]}\n")
-                 print(f"Created dummy biclique: {sorted_users[0]} | {sorted_items[0]}")
+         print("ERROR: No bicliques were extracted! Stopping execution as requested.")
+         sys.exit(1)
 else:
     print("Warning: bicliques_raw.txt not found.")
 
