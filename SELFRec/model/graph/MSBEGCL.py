@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import random
 from base.graph_recommender import GraphRecommender
 from util.sampler import next_batch_pairwise
 from base.torch_interface import TorchGraphInterface
 from util.loss_torch import bpr_loss, l2_reg_loss, InfoNCE
-from util.msbe_helper import load_msbe_adj
+from util.msbe_helper import load_msbe_adj, load_msbe_neighbors
 
 class MSBEGCL(GraphRecommender):
     def __init__(self, conf, training_set, test_set):
@@ -23,6 +24,12 @@ class MSBEGCL(GraphRecommender):
             self.data.item, 
             self.data.user_num, 
             self.data.item_num
+        )
+        
+        self.user_neighbors, self.item_neighbors = load_msbe_neighbors(
+            self.biclique_file,
+            self.data.user,
+            self.data.item
         )
         
         self.model = MSBEGCL_Encoder(
@@ -70,12 +77,31 @@ class MSBEGCL(GraphRecommender):
         return InfoNCE(user_view_1[u_idx], user_view_2[u_idx], 0.2) + InfoNCE(item_view_1[i_idx], item_view_2[i_idx], 0.2)
 
     def cal_cl_loss_msbe(self, idx):
-        u_idx = torch.unique(torch.Tensor(idx[0]).type(torch.long)).cuda()
-        i_idx = torch.unique(torch.Tensor(idx[1]).type(torch.long)).cuda()
-        user_global, item_global = self.model(view='global', perturbed=False)
-        user_local, item_local = self.model(view='local', perturbed=False)
-        # Using 0.2 as temperature, same as SimGCL
-        return InfoNCE(user_global[u_idx], user_local[u_idx], 0.2) + InfoNCE(item_global[i_idx], item_local[i_idx], 0.2)
+        u_batch = list(set(idx[0]))
+        i_batch = list(set(idx[1]))
+        
+        pos_u = []
+        for u in u_batch:
+            if u in self.user_neighbors and self.user_neighbors[u]:
+                pos_u.append(random.choice(self.user_neighbors[u]))
+            else:
+                pos_u.append(u)
+        
+        pos_i = []
+        for i in i_batch:
+            if i in self.item_neighbors and self.item_neighbors[i]:
+                pos_i.append(random.choice(self.item_neighbors[i]))
+            else:
+                pos_i.append(i)
+        
+        u_idx = torch.LongTensor(u_batch).cuda()
+        pos_u_idx = torch.LongTensor(pos_u).cuda()
+        i_idx = torch.LongTensor(i_batch).cuda()
+        pos_i_idx = torch.LongTensor(pos_i).cuda()
+        
+        user_view, item_view = self.model(view='global', perturbed=True)
+        
+        return InfoNCE(user_view[u_idx], user_view[pos_u_idx], 0.2) + InfoNCE(item_view[i_idx], item_view[pos_i_idx], 0.2)
 
     def save(self):
         with torch.no_grad():

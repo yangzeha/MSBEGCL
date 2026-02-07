@@ -70,3 +70,57 @@ def load_msbe_adj(file_path, user_map, item_map, user_num, item_num):
     norm_adj = d_mat_inv_sqrt.dot(adj).dot(d_mat_inv_sqrt)
     
     return norm_adj
+
+def load_msbe_neighbors(file_path, user_map, item_map):
+    """
+    Load neighbor dictionaries from bicliques.
+    Returns:
+        user_neighbors: dict {userid: [similar_userid_1, ...]}
+        item_neighbors: dict {itemid: [similar_itemid_1, ...]}
+    """
+    if not os.path.exists(file_path):
+        return {}, {}
+    
+    user_neighbors = {}
+    item_neighbors = {}
+    
+    with open(file_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            
+            if '|' in line: parts = line.split('|')
+            elif ':' in line: parts = line.split(':')
+            else: continue
+                
+            if len(parts) != 2: continue
+            
+            u_part = parts[0].strip().split()
+            i_part = parts[1].strip().split()
+            
+            # Resolve IDs
+            u_ids = [user_map.get(u) for u in u_part if u in user_map]
+            i_ids = [item_map.get(i) for i in i_part if i in item_map]
+            
+            # Build User-User connections (Clique expansion)
+            if len(u_ids) > 1:
+                for u in u_ids:
+                    if u not in user_neighbors: user_neighbors[u] = set()
+                    for v in u_ids:
+                        if u != v:
+                            user_neighbors[u].add(v)
+                            
+            # Build Item-Item connections
+            if len(i_ids) > 1:
+                for i in i_ids:
+                    if i not in item_neighbors: item_neighbors[i] = set()
+                    for j in i_ids:
+                        if i != j:
+                            item_neighbors[i].add(j)
+                            
+    # Convert sets to lists for sampling
+    for k in user_neighbors: user_neighbors[k] = list(user_neighbors[k])
+    for k in item_neighbors: item_neighbors[k] = list(item_neighbors[k])
+    
+    return user_neighbors, item_neighbors
+
