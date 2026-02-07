@@ -71,129 +71,107 @@ def load_msbe_adj(file_path, user_map, item_map, user_num, item_num):
     
     return norm_adj
 
-def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None):
+def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None, sim_threshold=0.1):
     """
-    Load neighbor dictionaries from bicliques.
-    Sorts neighbors by interaction similarity (Cosine Similarity).
+    Load Global neighbors based on Interaction Similarity (Cosine).
+    Finds the Top-2 global similar users/items. 
+    If similarity < sim_threshold, they are not included (triggering SimGCL fallback).
+    
+    Args:
+        file_path: Ignored in this version (as per global search constraint).
+        interaction_mat: User-Item sparse matrix.
+        sim_threshold: Minimum cosine similarity to be considered a neighbor.
+    
     Returns:
-        user_neighbors: dict {userid: [most_similar_uid, ...]}
-        item_neighbors: dict {itemid: [most_similar_iid, ...]}
+        user_neighbors: dict {userid: [sim_uid1, sim_uid2]}
+        item_neighbors: dict {itemid: [sim_iid1, sim_iid2]}
     """
-    if not os.path.exists(file_path):
-        return {}, {}
     
-    # 1. Collect biclique members (assuming disjoint or overlapping is fine, we just collect candidates)
-    # User said: "User will only appear in one maximal similar biclique" (Strict Partition? Or disjoint)
-    # We will assume they are grouped.
+    print(f"Calculating Global KNN Neighbors (Top-2, Threshold={sim_threshold})...")
     
-    user_candidates = {} # u -> set of neighbors
-    item_candidates = {} # i -> set of neighbors
-    
-    with open(file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line: continue
-            if '|' in line: parts = line.split('|')
-            elif ':' in line: parts = line.split(':')
-            else: continue
-            if len(parts) != 2: continue
-            
-            u_part = parts[0].strip().split()
-            i_part = parts[1].strip().split()
-            
-            u_ids = [user_map.get(u) for u in u_part if u in user_map]
-            i_ids = [item_map.get(i) for i in i_part if i in item_map]
-            
-            # Map every node to all other nodes in the same clique
-            if len(u_ids) > 1:
-                for u in u_ids:
-                    if u not in user_candidates: user_candidates[u] = set()
-                    for v in u_ids:
-                        if u != v:
-                            user_candidates[u].add(v)
-                            
-            if len(i_ids) > 1:
-                for i in i_ids:
-                    if i not in item_candidates: item_candidates[i] = set()
-                    for j in i_ids:
-                        if i != j:
-                            item_candidates[i].add(j)
-
-    # 2. Sort neighbors by Cosine Similarity on Interaction Matrix
-    print("Calculating similarities for neighbor ranking...")
-    
-    # Helper for fast cosine similarity between one row and many rows
-    def sort_by_similarity(candidates_dict, mat, transpose=False):
-        final_dict = {}
-        # Pre-compute norms if possible, or computing on the fly
-        # mat is sparse csr
-        # For item similarity, we need columns. If transpose=False (user), mat is U x I.
-        # If transpose=True (item), we want Cosine(Col_i, Col_j).
-        # Better to transpose matrix once for items.
-        
+    def get_knn(mat, transpose=False):
+        # mat is sparse CSR
         target_mat = mat.T if transpose else mat
-        # Ensure CSR for fast slicing
         target_mat = target_mat.tocsr()
         
-        # Norms
-        # row norms: sqrt(sum(x^2))
-        inv_norms = np.array(np.sqrt(target_mat.multiply(target_mat).sum(axis=1))).flatten()
-        with np.errstate(divide='ignore'):
-            inv_norms = 1.0 / inv_norms
-        inv_norms[np.isinf(inv_norms)] = 0.0
+        # 1. Normalize rows (L2) -> Dot product becomes Cosine Similarity
+        # Compute row norms
+        row_sums = np.array(target_mat.power(2).sum(axis=1)).flatten()
+        row_norms = np.sqrt(row_sums)
+        row_norms[row_norms == 0] = 1.0 # Avoid div by zero
         
-        # Process each node
-        processed = 0
-        total = len(candidates_dict)
+        # In-place normalization (or create diagonal matrix)
+        # Creating a new normalized matrix is safer
+        diag_norm = sp.diags(1.0 / row_norms)
+        norm_mat = diag_norm.dot(target_mat)
         
-        for node_id, neighbors_set in candidates_dict.items():
-            if not neighbors_set:
-                final_dict[node_id] = []
+        # 2. Compute Similarity: S = R * R^T
+        # Result is (N, N) sparse matrix
+        print(f"  Computing similarity matrix ({'Items' if transpose else 'Users'})...")
+        sim_mat = norm_mat.dot(norm_mat.T)
+        
+        # 3. Extract Top-2 for each row
+        neighbors = {}
+        
+        # Iterate over rows efficiently
+        # sim_mat is CSR/CSC. 
+        # Since we want row-wise top-k, convert to CSR if not already
+        sim_mat = sim_mat.tocsr()
+        
+        num_nodes = sim_mat.shape[0]
+        
+        # Loop is okay for < 50k nodes in python if operations inside are simple
+        # For significantly larger, we'd need vectorized topk (e.g. torch/faiss)
+        # But here we rely on scipy sparse structure
+        
+        for i in range(num_nodes):
+            row = sim_mat[i]
+            if row.nnz == 0:
                 continue
                 
-            neighbors = list(neighbors_set)
+            # Get indices and data
+            indices = row.indices
+            data = row.data
             
-            # Vectorized Sim Calculation: 
-            # query_vec * neighbors_matrix.T
+            # Filter self-loop (usually similarity 1.0 at index i)
+            mask = indices != i
+            indices = indices[mask]
+            data = data[mask]
             
-            # 1. Get query vector
-            q_vec = target_mat[node_id]
-            q_norm = inv_norms[node_id]
-            
-            if q_vec.nnz == 0:
-                final_dict[node_id] = neighbors # random order
+            if len(data) == 0:
                 continue
             
-            # 2. Get neighbors submatrix
-            # Using fancy indexing might be slow if list is long, but here it's small (clique size)
-            nb_indices = neighbors
-            nb_mat = target_mat[nb_indices]
+            # Filter by threshold
+            mask_thresh = data >= sim_threshold
+            indices = indices[mask_thresh]
+            data = data[mask_thresh]
             
-            if nb_mat.nnz == 0:
-                final_dict[node_id] = neighbors
+            if len(data) == 0:
                 continue
                 
-            # 3. Dot product
-            # (1 x F) * (K x F)^T -> (1 x K)
-            dot_prods = q_vec.dot(nb_mat.T).toarray().flatten()
+            # Find Top-2
+            # precise sort
+            # argsort is ascending, take last 2
+            if len(data) > 2:
+                top_idx_local = np.argsort(data)[-2:]
+                top_global_indices = indices[top_idx_local]
+                # Order descending
+                top_global_indices = top_global_indices[::-1] # Highest first
+            else:
+                # Less than or equal to 2, just sort descending
+                top_idx_local = np.argsort(data)[::-1]
+                top_global_indices = indices[top_idx_local]
             
-            # 4. Normalize
-            nb_norms = inv_norms[nb_indices]
-            sims = dot_prods * q_norm * nb_norms
+            neighbors[i] = top_global_indices.tolist()
             
-            # 5. Sort
-            # Zip and sort descending
-            sorted_pairs = sorted(zip(neighbors, sims), key=lambda x: x[1], reverse=True)
-            final_dict[node_id] = [p[0] for p in sorted_pairs]
-            
-            processed += 1
-            if processed % 5000 == 0:
-                print(f"Processed {processed}/{total} nodes...")
+            if i % 5000 == 0 and i > 0:
+                print(f"    Processed {i}/{num_nodes} nodes...")
                 
-        return final_dict
+        return neighbors
 
-    user_neighbors = sort_by_similarity(user_candidates, interaction_mat, transpose=False)
-    item_neighbors = sort_by_similarity(item_candidates, interaction_mat, transpose=True)
+    user_neighbors = get_knn(interaction_mat, transpose=False)
+    item_neighbors = get_knn(interaction_mat, transpose=True)
     
+    print(f"Global KNN complete. Found neighbors for {len(user_neighbors)} users and {len(item_neighbors)} items.")
     return user_neighbors, item_neighbors
 

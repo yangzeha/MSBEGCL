@@ -30,7 +30,8 @@ class MSBEGCL(GraphRecommender):
             self.biclique_file,
             self.data.user,
             self.data.item,
-            self.data.interaction_mat
+            self.data.interaction_mat,
+            self.eps
         )
         
         self.model = MSBEGCL_Encoder(
