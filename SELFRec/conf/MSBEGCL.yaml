@@ -9,7 +9,7 @@ item.ranking.topN: [10,20]
 
 embedding.size: 64
 max.epoch: 40
-batch.size: 4000
+batch.size: 2048
 learning.rate: 0.001
 reg.lambda: 0.0001
 
