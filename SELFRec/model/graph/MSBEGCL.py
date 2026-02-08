@@ -14,7 +14,7 @@ class MSBEGCL(GraphRecommender):
         args = self.config['MSBEGCL']
         self.cl_rate = float(args['lambda'])  # Uniformity Weight (SimGCL)
         self.msb_rate = float(args['gamma'])   # Structure Weight (MSBE)
-        self.fallback_weight = float(args.get('fallback_weight', 0.2)) # Fallback Weight
+        self.fallback_weight = float(args.get('fallback_weight', 0.0)) # Disable Fallback by default (0.0)
         self.eps = float(args['eps'])
         self.n_layers = int(args['n_layer'])
         self.temp = float(args.get('tau', 0.2)) # Temperature
@@ -58,8 +58,10 @@ class MSBEGCL(GraphRecommender):
                             InfoNCE(item_v1[i_idx_unique], item_v2[i_idx_unique], self.temp)
 
                 # 3. L_sim: Weighted Structure-Confidence-Aware Loss
-                l_sim_u = self.cal_msbe_loss(u_idx_unique, self.user_msb_neighbors, rec_user_emb)
-                l_sim_i = self.cal_msbe_loss(i_idx_unique, self.item_msb_neighbors, rec_item_emb)
+                # We simply supply the perturbed views (view2) as the fallback target
+                # This makes Scenario B = InfoNCE(Clean, Perturbed) -> Reinforce consistency locally
+                l_sim_u = self.cal_msbe_loss(u_idx_unique, self.user_msb_neighbors, rec_user_emb, user_v2)
+                l_sim_i = self.cal_msbe_loss(i_idx_unique, self.item_msb_neighbors, rec_item_emb, item_v2)
                 l_sim = l_sim_u + l_sim_i
 
                 # 4. Total Loss Combination
@@ -80,22 +82,15 @@ class MSBEGCL(GraphRecommender):
             self.fast_evaluation(epoch)
         self.user_emb, self.item_emb = self.best_user_emb, self.best_item_emb
 
-    def cal_msbe_loss(self, independent_indices, neighbor_dict, all_embeddings):
-        # indices: Tensor of unique node indices in current batch
-        # neighbor_dict: {node_id: [list of neighbors]}
-        # all_embeddings: Full embedding matrix
-        
+    def cal_msbe_loss(self, independent_indices, neighbor_dict, all_embeddings, perturbed_embeddings=None):
         loss = 0.0
-        
-        # Convert indices to CPU list for dictionary lookup
         nodes_cpu = independent_indices.cpu().tolist()
         
-        # Lists to store batch samples
-        # Group A: High Confidence (Has Biclique)
         anchors_A = []
         targets_A = []
         
-        # Group B: Low Confidence (No Biclique -> Fallback)
+        # Scenario B: if fallback is enabled, we use Perturbed View as target
+        # If fallback_weight is 0, we skip B computation
         anchors_B = []
         targets_B = []
         
@@ -103,36 +98,25 @@ class MSBEGCL(GraphRecommender):
             if idx in neighbor_dict and len(neighbor_dict[idx]) > 0:
                 # Scenario A: Mean Pooling of Biclique Neighbors
                 neighbors = neighbor_dict[idx]
-                # Random sample up to N neighbors to save compute if biclique is huge, 
-                # or take all? Mean of all is better for robustness.
-                # Optimization: To avoid too many index lookups, we can sample.
-                # For now, let's take up to 5 random neighbors to compute mean.
+                
+                # Sample 5 neighbors to reduce noise/compute
                 if len(neighbors) > 5:
                     sampled = random.sample(neighbors, 5)
                 else:
                     sampled = neighbors
                 
-                # We need to stack embeddings. Doing this one by one is slow.
-                # Hack: Accumulate indices first.
-                # Actually, strictly following user idea: "Mean of ALL members"
-                # Let's perform the lookup.
                 anchor_emb = all_embeddings[idx]
-                target_emb = torch.mean(all_embeddings[sampled], dim=0)
+                # CRITICAL FIX: Mean pooling + Normalization
+                mean_emb = torch.mean(all_embeddings[sampled], dim=0)
+                target_emb = F.normalize(mean_emb, dim=0) 
                 
                 anchors_A.append(anchor_emb)
                 targets_A.append(target_emb)
                 
-            else:
-                # Scenario B: Fallback (GLSCL/Self)
-                # Currently fallback to Self (as we don't have pre-calc similarity file yet)
-                # If you have 'top1_neighbors.npy', load it here.
-                # anchor = all_embeddings[idx]
-                # target = all_embeddings[top1_neighbor[idx]]
-                
+            elif self.fallback_weight > 0 and perturbed_embeddings is not None:
+                # Scenario B: Fallback to SimGCL logic (Clean vs Perturbed Self)
                 anchor_emb = all_embeddings[idx]
-                # Fallback to Self for now -> Effectively a penalty for deviating from existing self
-                # (Or strictly, should be a similar node. Using Self with InfoNCE against other batch negatives is OK)
-                target_emb = all_embeddings[idx] 
+                target_emb = perturbed_embeddings[idx]
                 
                 anchors_B.append(anchor_emb)
                 targets_B.append(target_emb)
@@ -143,10 +127,11 @@ class MSBEGCL(GraphRecommender):
             t_emb = torch.stack(targets_A)
             loss += InfoNCE(a_emb, t_emb, self.temp)
             
-        # Compute Loss B (Low Weight: fallback_weight)
+        # Compute Loss B (Low Weight)
         if len(anchors_B) > 0:
             a_emb = torch.stack(anchors_B)
             t_emb = torch.stack(targets_B)
+            # This effectively adds more weight to standard CL for these nodes
             loss += self.fallback_weight * InfoNCE(a_emb, t_emb, self.temp)
             
         return loss
