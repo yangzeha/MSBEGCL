@@ -16,12 +16,11 @@ reg.lambda: 0.0001
 MSBEGCL:
   n_layer: 2
   lambda: 0.5      # Weight for SimGCL noise contrastive loss
-  gamma: 0.01      # Weight for MSBE structural contrastive loss
+  gamma: 0.1       # Weight for MSBE structural contrastive loss
+  fallback_weight: 0.2 # Fallback weight when no biclique found (GLSCL logic)
   alpha: 1.0       # Weight for Item CL in structural loss (User_CL + alpha * Item_CL)
   eps: 0.1         # Noise eps for SimGCL
+  sim_threshold: 0.2 # Similarity threshold for global neighbor search
   biclique.file: ./dataset/yelp2018/bicliques.txt # Biclique file path (required by config loader)
-  sim_threshold: 0.1 # Similarity threshold for global neighbor search
-  eps: 0.1         # Noise magnitude for SimGCL
-  sim_threshold: 0.1 # Similarity threshold (Same as GLSCL) # Path to biclique file
 
 output: ./results/
