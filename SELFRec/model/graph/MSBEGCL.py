@@ -94,13 +94,14 @@ class MSBEGCL(GraphRecommender):
             for u in batch_nodes:
                 nbs = neighbor_dict.get(u, [])
                 if nbs:
-                    # User requirement: Take top 2 if available
-                    curr_nbs = nbs[:2]
+                    # User requirement: Take Global Top-1 (Most Similar)
+                    # If multiple returned, taking index 0 is valid as they are sorted descending
+                    curr_nbs = nbs[:1]
                     for v in curr_nbs:
                         anchors_nb.append(u)
                         positives_nb.append(v)
                 else:
-                    # Fallback to SimGCL
+                    # Fallback to SimGCL (Self vs Self perturbed)
                     anchors_self.append(u)
                     positives_self.append(u)
             return (anchors_nb, positives_nb), (anchors_self, positives_self)

@@ -71,23 +71,21 @@ def load_msbe_adj(file_path, user_map, item_map, user_num, item_num):
     
     return norm_adj
 
-def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None, sim_threshold=0.1):
+    def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None, sim_threshold=0.1):
     """
-    Load Global neighbors based on Interaction Similarity (Cosine).
-    Finds the Top-2 global similar users/items. 
-    If similarity < sim_threshold, they are not included (triggering SimGCL fallback).
+    Load Global Top-1 neighbor based on Interaction Similarity (Cosine).
+    If max similarity < sim_threshold, returned list is empty (triggering SimGCL fallback).
     
     Args:
-        file_path: Ignored in this version (as per global search constraint).
         interaction_mat: User-Item sparse matrix.
-        sim_threshold: Minimum cosine similarity to be considered a neighbor.
+        sim_threshold: Minimum cosine similarity.
     
     Returns:
-        user_neighbors: dict {userid: [sim_uid1, sim_uid2]}
-        item_neighbors: dict {itemid: [sim_iid1, sim_iid2]}
+        user_neighbors: dict {userid: [best_sim_uid]}
+        item_neighbors: dict {itemid: [best_sim_iid]}
     """
     
-    print(f"Calculating Global KNN Neighbors (Top-2, Threshold={sim_threshold})...")
+    print(f"Calculating Global Top-1 Nearest Neighbor (Threshold={sim_threshold})...")
     
     def get_knn(mat, transpose=False):
         # mat is sparse CSR
@@ -100,71 +98,50 @@ def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None, sim
         row_norms = np.sqrt(row_sums)
         row_norms[row_norms == 0] = 1.0 # Avoid div by zero
         
-        # In-place normalization (or create diagonal matrix)
-        # Creating a new normalized matrix is safer
         diag_norm = sp.diags(1.0 / row_norms)
         norm_mat = diag_norm.dot(target_mat)
         
-        # 2. Compute Similarity: S = R * R^T
-        # Result is (N, N) sparse matrix
-        print(f"  Computing similarity matrix ({'Items' if transpose else 'Users'})...")
+        # 2. Compute Similarity: S = R * R^T (Sparse dot product)
+        # Note: This can be memory intensive for very large datasets (N^2). 
+        # For Yelp2018 (30k users), 30k*30k float32 ~ 3.6GB dense, but sparse likely fits.
+        print(f"  Computing full similarity matrix ({'Items' if transpose else 'Users'})...")
         sim_mat = norm_mat.dot(norm_mat.T)
         
-        # 3. Extract Top-2 for each row
+        # 3. Extract Top-1 for each row
         neighbors = {}
-        
-        # Iterate over rows efficiently
-        # sim_mat is CSR/CSC. 
-        # Since we want row-wise top-k, convert to CSR if not already
         sim_mat = sim_mat.tocsr()
-        
         num_nodes = sim_mat.shape[0]
-        
-        # Loop is okay for < 50k nodes in python if operations inside are simple
-        # For significantly larger, we'd need vectorized topk (e.g. torch/faiss)
-        # But here we rely on scipy sparse structure
         
         for i in range(num_nodes):
             row = sim_mat[i]
-            if row.nnz == 0:
-                continue
-                
+            if row.nnz == 0: continue
+            
             # Get indices and data
             indices = row.indices
             data = row.data
             
-            # Filter self-loop (usually similarity 1.0 at index i)
+            # Filter self-loop
             mask = indices != i
             indices = indices[mask]
             data = data[mask]
             
-            if len(data) == 0:
-                continue
+            if len(data) == 0: continue
             
             # Filter by threshold
+            # User requirement: If similarity < threshold, filtering happens here -> empty list -> SimGCL
             mask_thresh = data >= sim_threshold
             indices = indices[mask_thresh]
             data = data[mask_thresh]
             
-            if len(data) == 0:
-                continue
+            if len(data) == 0: continue
                 
-            # Find Top-2
-            # precise sort
-            # argsort is ascending, take last 2
-            if len(data) > 2:
-                top_idx_local = np.argsort(data)[-2:]
-                top_global_indices = indices[top_idx_local]
-                # Order descending
-                top_global_indices = top_global_indices[::-1] # Highest first
-            else:
-                # Less than or equal to 2, just sort descending
-                top_idx_local = np.argsort(data)[::-1]
-                top_global_indices = indices[top_idx_local]
+            # Find Top-1 (Global Max)
+            max_idx_local = np.argmax(data)
+            best_neighbor = indices[max_idx_local]
             
-            neighbors[i] = top_global_indices.tolist()
+            neighbors[i] = [best_neighbor]
             
-            if i % 5000 == 0 and i > 0:
+            if i % 10000 == 0 and i > 0:
                 print(f"    Processed {i}/{num_nodes} nodes...")
                 
         return neighbors
@@ -172,6 +149,6 @@ def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None, sim
     user_neighbors = get_knn(interaction_mat, transpose=False)
     item_neighbors = get_knn(interaction_mat, transpose=True)
     
-    print(f"Global KNN complete. Found neighbors for {len(user_neighbors)} users and {len(item_neighbors)} items.")
+    print(f"Global Top-1 Search complete. Found valid neighbors for {len(user_neighbors)} users and {len(item_neighbors)} items.")
     return user_neighbors, item_neighbors
 
