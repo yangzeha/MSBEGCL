@@ -88,68 +88,40 @@ class MSBEGCL(GraphRecommender):
         return InfoNCE(user_view_1[u_idx], user_view_2[u_idx], 0.2) + InfoNCE(item_view_1[i_idx], item_view_2[i_idx], 0.2)
 
     def cal_cl_loss_msbe(self, idx):
-        # Calculates Structure Loss (Global Neighbor Contrast)
-        u_batch = list(set(idx[0]))
-        i_batch = list(set(idx[1]))
+        # Implementation based on GLSCL paper logic:
+        # Uniformity Loss + Local Similarity Loss
         
-        def split_tasks(batch_nodes, neighbor_dict):
-            # Task A: Neighbor Contrast (u, neighbor)
-            anchors_nb = []
-            positives_nb = []
-            
-            # Note: We do NOT fallback to self-contrast here anymore
-            # because self-contrast is handled by cal_cl_loss_noise separately.
-            
-            for u in batch_nodes:
-                nbs = neighbor_dict.get(u, [])
-                if nbs:
-                    # User requirement: Take Global Top-1
-                    # If neighbor exists, add to structure loss
-                    curr_nbs = nbs[:1]
-                    for v in curr_nbs:
-                        anchors_nb.append(u)
-                        positives_nb.append(v)
-                        
-            return anchors_nb, positives_nb
-
-        u_anc_nb, u_pos_nb = split_tasks(u_batch, self.user_neighbors)
-        i_anc_nb, i_pos_nb = split_tasks(i_batch, self.item_neighbors)
-
-        # Structure View: We can reuse perturbed views or generate new ones.
-        # Ideally structure loss compares Normalized(u) vs Normalized(neighbor).
-        # Using perturbed views (robust) as per original code structure.
+        u_idx = torch.unique(torch.Tensor(idx[0]).type(torch.long)).cuda()
+        i_idx = torch.unique(torch.Tensor(idx[1]).type(torch.long)).cuda()
+        
+        # Original perturbed views for robust comparison
         user_view_1, item_view_1 = self.model(view='global', perturbed=True)
-        
-        def batch_nce(anchors, positives, neg_pool, temp=0.2):
-            if anchors.shape[0] == 0: return torch.tensor(0.0).cuda()
-            anchors = F.normalize(anchors, dim=1)
-            positives = F.normalize(positives, dim=1)
-            neg_pool = F.normalize(neg_pool, dim=1)
-            # In-batch negatives from the WHOLE batch view
-            pos_logits = (anchors * positives).sum(dim=1, keepdim=True) / temp
-            neg_logits = torch.mm(anchors, neg_pool.t()) / temp
-            all_logits = torch.cat([pos_logits, neg_logits], dim=1)
-            return -F.log_softmax(all_logits, dim=1)[:, 0].mean()
+        # user_view_2, item_view_2 = self.model(view='global', perturbed=True) 
 
-        # 1. Neighbor Loss Only
-        loss_structure_user = 0
-        loss_structure_item = 0
+        def get_pos_neighbors(batch_nodes, neighbor_dict):
+            pos_list = []
+            for node in batch_nodes:
+                if node in neighbor_dict and len(neighbor_dict[node]) > 0:
+                    # Found neighbor > T (as per loader filtering)
+                    pos_list.append(neighbor_dict[node][0]) 
+                else:
+                    # Fallback to self (Threshold mechanism)
+                    pos_list.append(node)
+            return torch.LongTensor(pos_list).cuda()
+
+        # User Side
+        u_batch = u_idx.cpu().tolist()
+        pos_u_idx = get_pos_neighbors(u_batch, self.user_neighbors)
         
-        if u_anc_nb:
-            loss_structure_user = batch_nce(
-                user_view_1[torch.LongTensor(u_anc_nb).cuda()], 
-                user_view_1[torch.LongTensor(u_pos_nb).cuda()], 
-                user_view_1[torch.LongTensor(u_batch).cuda()]
-            )
-        if i_anc_nb:
-            loss_structure_item = batch_nce(
-                item_view_1[torch.LongTensor(i_anc_nb).cuda()], 
-                item_view_1[torch.LongTensor(i_pos_nb).cuda()], 
-                item_view_1[torch.LongTensor(i_batch).cuda()]
-            )
-            
-        # Apply Alpha
-        return loss_structure_user + self.alpha * loss_structure_item
+        # Item Side
+        i_batch = i_idx.cpu().tolist()
+        pos_i_idx = get_pos_neighbors(i_batch, self.item_neighbors)
+
+        # Calculate InfoNCE: View(u) vs View(Neighbor/Self)
+        loss_u = InfoNCE(user_view_1[u_idx], user_view_1[pos_u_idx], 0.2)
+        loss_i = InfoNCE(item_view_1[i_idx], item_view_1[pos_i_idx], 0.2)
+
+        return loss_u + self.alpha * loss_i
 
     def save(self):
         with torch.no_grad():
