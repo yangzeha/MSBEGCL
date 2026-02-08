@@ -15,8 +15,9 @@ reg.lambda: 0.0001
 
 MSBEGCL:
   n_layer: 2
-  lambda: 0.5      # Weight for SimGCL noise contrastive loss
-  gamma: 0.2       # Weight for MSBE structural contrastive loss
+  lambda: 0.5      # Weight for SimGCL noise contrastive loss -> lambda2 (0.2) in GLSCL maybe?
+  gamma: 0.2       # Weight for MSBE structural contrastive loss -> lambda1
+  alpha: 1.0       # Weight for Item CL in structural loss (User_CL + alpha * Item_CL)
   eps: 0.1         # Noise magnitude for SimGCL
   sim_threshold: 0.1 # Similarity threshold (Same as GLSCL) # Path to biclique file
 

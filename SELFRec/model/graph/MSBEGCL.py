@@ -29,6 +29,9 @@ class MSBEGCL(GraphRecommender):
         # Sim Threshold from config (default 0.1 if missing)
         self.sim_threshold = float(args.get('sim_threshold', 0.1))
         
+        # Alpha parameter (User vs Item weight)
+        self.alpha = float(args.get('alpha', 1.0))
+        
         self.user_neighbors, self.item_neighbors = load_msbe_neighbors(
             self.biclique_file,
             self.data.user,
@@ -129,36 +132,46 @@ class MSBEGCL(GraphRecommender):
         total_loss = 0
         
         # 1. Neighbor Loss (View1 vs View1)
+        loss_structure_user = 0
+        loss_structure_item = 0
+        
         if u_anc_nb:
-            total_loss += batch_nce(
+            loss_structure_user = batch_nce(
                 user_view_1[torch.LongTensor(u_anc_nb).cuda()], 
                 user_view_1[torch.LongTensor(u_pos_nb).cuda()], 
                 user_view_1[torch.LongTensor(u_batch).cuda()]
             )
         if i_anc_nb:
-            total_loss += batch_nce(
+            loss_structure_item = batch_nce(
                 item_view_1[torch.LongTensor(i_anc_nb).cuda()], 
                 item_view_1[torch.LongTensor(i_pos_nb).cuda()], 
                 item_view_1[torch.LongTensor(i_batch).cuda()]
             )
             
         # 2. Self-SimGCL Loss (View1 vs View2)
+        loss_noise_user = 0
+        loss_noise_item = 0
+        
         if u_anc_self:
             idx_anc = torch.LongTensor(u_anc_self).cuda()
-            total_loss += batch_nce(
+            loss_noise_user = batch_nce(
                 user_view_1[idx_anc], 
                 user_view_2[idx_anc], 
                 user_view_2[torch.LongTensor(u_batch).cuda()]
             )
         if i_anc_self:
             idx_anc = torch.LongTensor(i_anc_self).cuda()
-            total_loss += batch_nce(
+            loss_noise_item = batch_nce(
                 item_view_1[idx_anc], 
                 item_view_2[idx_anc], 
                 item_view_2[torch.LongTensor(i_batch).cuda()]
             )
             
-        return total_loss
+        # Apply Alpha: L_user + alpha * L_item
+        total_structure = loss_structure_user + self.alpha * loss_structure_item
+        total_noise = loss_noise_user + self.alpha * loss_noise_item
+        
+        return total_structure + total_noise
 
     def save(self):
         with torch.no_grad():
