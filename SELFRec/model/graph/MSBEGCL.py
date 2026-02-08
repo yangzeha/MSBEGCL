@@ -14,19 +14,16 @@ class MSBEGCL(GraphRecommender):
         args = self.config['MSBEGCL']
         self.cl_rate = float(args['lambda'])  # Uniformity Weight (SimGCL)
         self.msb_rate = float(args['gamma'])   # Structure Weight (MSBE)
-        self.fallback_weight = float(args.get('fallback_weight', 0.0)) # Disable Fallback by default (0.0)
+        self.fallback_weight = float(args.get('fallback_weight', 0.0)) # Disable Fallback by default
         self.eps = float(args['eps'])
         self.n_layers = int(args['n_layer'])
-        self.temp = float(args.get('tau', 0.2)) # Temperature
+        self.temp = float(args.get('tau', 0.2)) 
         
-        # Encoder (SimGCL Style)
         self.model = MSBEGCL_Encoder(self.data, self.emb_size, self.eps, self.n_layers)
         
-        # Load MSBE Neighbors
         self.biclique_file = args['biclique.file']
-        self.sim_threshold = float(args.get('sim_threshold', 0.1))
+        self.sim_threshold = float(args.get('sim_threshold', 0.2)) 
         
-        # user_msb_neighbors: {uid: [nid1, nid2, ...]}
         self.user_msb_neighbors, self.item_msb_neighbors = load_msbe_neighbors(
             self.biclique_file,
             self.data.user,
@@ -42,29 +39,28 @@ class MSBEGCL(GraphRecommender):
             for n, batch in enumerate(next_batch_pairwise(self.data, self.batch_size)):
                 user_idx, pos_idx, neg_idx = batch
                 
-                # 1. Main Task: BPR (No Noise)
+                # 1. Main Task: BPR (Clean Embeddings) -> ONLY used for BPR
                 rec_user_emb, rec_item_emb = model(perturbed=False)
                 user_emb, pos_item_emb, neg_item_emb = rec_user_emb[user_idx], rec_item_emb[pos_idx], rec_item_emb[neg_idx]
                 l_main = bpr_loss(user_emb, pos_item_emb, neg_item_emb)
 
-                # 2. L_uniform: SimGCL Noise Contrastive Loss
+                # 2. Perturbed Views Generation
                 user_v1, item_v1 = model(perturbed=True)
                 user_v2, item_v2 = model(perturbed=True)
                 
                 u_idx_unique = torch.unique(torch.tensor(user_idx).cuda())
                 i_idx_unique = torch.unique(torch.tensor(pos_idx).cuda())
                 
+                # 3. L_uniform (SimGCL): Self-Contrast (View1 <-> View2)
                 l_uniform = InfoNCE(user_v1[u_idx_unique], user_v2[u_idx_unique], self.temp) + \
                             InfoNCE(item_v1[i_idx_unique], item_v2[i_idx_unique], self.temp)
 
-                # 3. L_sim: Weighted Structure-Confidence-Aware Loss
-                # We simply supply the perturbed views (view2) as the fallback target
-                # This makes Scenario B = InfoNCE(Clean, Perturbed) -> Reinforce consistency locally
-                l_sim_u = self.cal_msbe_loss(u_idx_unique, self.user_msb_neighbors, rec_user_emb, user_v2)
-                l_sim_i = self.cal_msbe_loss(i_idx_unique, self.item_msb_neighbors, rec_item_emb, item_v2)
+                # 4. L_sim (Structure): Idea A - Single Random Sample from Biclique
+                l_sim_u = self.cal_msbe_loss(u_idx_unique, self.user_msb_neighbors, user_v1, user_v2)
+                l_sim_i = self.cal_msbe_loss(i_idx_unique, self.item_msb_neighbors, item_v1, item_v2)
                 l_sim = l_sim_u + l_sim_i
 
-                # 4. Total Loss Combination
+                # Total Loss
                 batch_loss = l_main + \
                              self.cl_rate * l_uniform + \
                              self.msb_rate * l_sim + \
@@ -82,57 +78,42 @@ class MSBEGCL(GraphRecommender):
             self.fast_evaluation(epoch)
         self.user_emb, self.item_emb = self.best_user_emb, self.best_item_emb
 
-    def cal_msbe_loss(self, independent_indices, neighbor_dict, all_embeddings, perturbed_embeddings=None):
+    def cal_msbe_loss(self, independent_indices, neighbor_dict, view1, view2):
+        # Idea A: Stochastic Single Sample instead of Mean Pooling
         loss = 0.0
         nodes_cpu = independent_indices.cpu().tolist()
         
         anchors_A = []
         targets_A = []
         
-        # Scenario B: if fallback is enabled, we use Perturbed View as target
-        # If fallback_weight is 0, we skip B computation
         anchors_B = []
         targets_B = []
         
         for idx in nodes_cpu:
             if idx in neighbor_dict and len(neighbor_dict[idx]) > 0:
-                # Scenario A: Mean Pooling of Biclique Neighbors
+                # Scenario A: Has Biclique -> Random Single Neighbor
                 neighbors = neighbor_dict[idx]
                 
-                # Sample 5 neighbors to reduce noise/compute
-                if len(neighbors) > 5:
-                    sampled = random.sample(neighbors, 5)
-                else:
-                    sampled = neighbors
+                # KEY CHANGE: Randomly choose exactly ONE neighbor
+                # This introduces stochasticity and prevents mean-smoothing
+                sampled_node = random.choice(neighbors)
                 
-                anchor_emb = all_embeddings[idx]
-                # CRITICAL FIX: Mean pooling + Normalization
-                mean_emb = torch.mean(all_embeddings[sampled], dim=0)
-                target_emb = F.normalize(mean_emb, dim=0) 
+                anchor_emb = view1[idx]
+                target_emb = view2[sampled_node] # Cross-view Structure Consistency
                 
                 anchors_A.append(anchor_emb)
                 targets_A.append(target_emb)
                 
-            elif self.fallback_weight > 0 and perturbed_embeddings is not None:
-                # Scenario B: Fallback to SimGCL logic (Clean vs Perturbed Self)
-                anchor_emb = all_embeddings[idx]
-                target_emb = perturbed_embeddings[idx]
-                
-                anchors_B.append(anchor_emb)
-                targets_B.append(target_emb)
+            elif self.fallback_weight > 0:
+                # Scenario B: Fallback (Standard SimGCL)
+                anchors_B.append(view1[idx])
+                targets_B.append(view2[idx])
         
-        # Compute Loss A (High Weight: 1.0)
         if len(anchors_A) > 0:
-            a_emb = torch.stack(anchors_A)
-            t_emb = torch.stack(targets_A)
-            loss += InfoNCE(a_emb, t_emb, self.temp)
+            loss += InfoNCE(torch.stack(anchors_A), torch.stack(targets_A), self.temp)
             
-        # Compute Loss B (Low Weight)
         if len(anchors_B) > 0:
-            a_emb = torch.stack(anchors_B)
-            t_emb = torch.stack(targets_B)
-            # This effectively adds more weight to standard CL for these nodes
-            loss += self.fallback_weight * InfoNCE(a_emb, t_emb, self.temp)
+            loss += self.fallback_weight * InfoNCE(torch.stack(anchors_B), torch.stack(targets_B), self.temp)
             
         return loss
 
