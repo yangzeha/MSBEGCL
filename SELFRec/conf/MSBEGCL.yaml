@@ -18,6 +18,6 @@ MSBEGCL:
   lambda: 0.5      # Weight for SimGCL noise contrastive loss
   gamma: 0.2       # Weight for MSBE structural contrastive loss
   eps: 0.1         # Noise magnitude for SimGCL
-  biclique.file: ./dataset/yelp2018/bicliques.txt # Path to biclique file
+  sim_threshold: 0.1 # Similarity threshold (Same as GLSCL) # Path to biclique file
 
 output: ./results/
