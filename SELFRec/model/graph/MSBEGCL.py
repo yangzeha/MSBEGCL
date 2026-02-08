@@ -61,15 +61,19 @@ class MSBEGCL(GraphRecommender):
                 
                 rec_loss = bpr_loss(user_emb, pos_item_emb, neg_item_emb)
                 
-                cl_loss_msbe = self.msbe_rate * self.cal_cl_loss_msbe([user_idx, pos_idx])
+                # 1. SimGCL Noise Contrastive Loss (Base, Weight: lambda)
+                cl_loss_noise = self.cl_rate * self.cal_cl_loss_noise([user_idx, pos_idx])
                 
-                batch_loss = rec_loss + l2_reg_loss(self.reg, user_emb, pos_item_emb) + cl_loss_msbe
+                # 2. MSBE/GLSCL Structural Contrastive Loss (Auxiliary, Weight: gamma)
+                cl_loss_structure = self.msbe_rate * self.cal_cl_loss_msbe([user_idx, pos_idx])
+                
+                batch_loss = rec_loss + l2_reg_loss(self.reg, user_emb, pos_item_emb) + cl_loss_noise + cl_loss_structure
                 
                 optimizer.zero_grad()
                 batch_loss.backward()
                 optimizer.step()
                 if n % 100 == 0 and n > 0:
-                    print('training:', epoch + 1, 'batch', n, 'rec_loss:', rec_loss.item(), 'cl_msbe:', cl_loss_msbe.item())
+                    print('training:', epoch + 1, 'batch', n, 'rec_loss:', rec_loss.item(), 'cl_noise:', cl_loss_noise.item(), 'cl_struct:', cl_loss_structure.item())
             
             with torch.no_grad():
                 self.user_emb, self.item_emb = self.model(view='global')
@@ -84,54 +88,50 @@ class MSBEGCL(GraphRecommender):
         return InfoNCE(user_view_1[u_idx], user_view_2[u_idx], 0.2) + InfoNCE(item_view_1[i_idx], item_view_2[i_idx], 0.2)
 
     def cal_cl_loss_msbe(self, idx):
+        # Calculates Structure Loss (Global Neighbor Contrast)
         u_batch = list(set(idx[0]))
         i_batch = list(set(idx[1]))
         
-        # Helper to split tasks
         def split_tasks(batch_nodes, neighbor_dict):
             # Task A: Neighbor Contrast (u, neighbor)
             anchors_nb = []
             positives_nb = []
             
-            # Task B: Self Contrast (u, u) - SimGCL Fallback
-            anchors_self = []
-            positives_self = []
+            # Note: We do NOT fallback to self-contrast here anymore
+            # because self-contrast is handled by cal_cl_loss_noise separately.
             
             for u in batch_nodes:
                 nbs = neighbor_dict.get(u, [])
                 if nbs:
-                    # User requirement: Take Global Top-1 (Most Similar)
-                    # If multiple returned, taking index 0 is valid as they are sorted descending
+                    # User requirement: Take Global Top-1
+                    # If neighbor exists, add to structure loss
                     curr_nbs = nbs[:1]
                     for v in curr_nbs:
                         anchors_nb.append(u)
                         positives_nb.append(v)
-                else:
-                    # Fallback to SimGCL (Self vs Self perturbed)
-                    anchors_self.append(u)
-                    positives_self.append(u)
-            return (anchors_nb, positives_nb), (anchors_self, positives_self)
+                        
+            return anchors_nb, positives_nb
 
-        (u_anc_nb, u_pos_nb), (u_anc_self, u_pos_self) = split_tasks(u_batch, self.user_neighbors)
-        (i_anc_nb, i_pos_nb), (i_anc_self, i_pos_self) = split_tasks(i_batch, self.item_neighbors)
+        u_anc_nb, u_pos_nb = split_tasks(u_batch, self.user_neighbors)
+        i_anc_nb, i_pos_nb = split_tasks(i_batch, self.item_neighbors)
 
-        # Generate two views for SimGCL fallback
+        # Structure View: We can reuse perturbed views or generate new ones.
+        # Ideally structure loss compares Normalized(u) vs Normalized(neighbor).
+        # Using perturbed views (robust) as per original code structure.
         user_view_1, item_view_1 = self.model(view='global', perturbed=True)
-        user_view_2, item_view_2 = self.model(view='global', perturbed=True)
         
         def batch_nce(anchors, positives, neg_pool, temp=0.2):
             if anchors.shape[0] == 0: return torch.tensor(0.0).cuda()
             anchors = F.normalize(anchors, dim=1)
             positives = F.normalize(positives, dim=1)
             neg_pool = F.normalize(neg_pool, dim=1)
+            # In-batch negatives from the WHOLE batch view
             pos_logits = (anchors * positives).sum(dim=1, keepdim=True) / temp
             neg_logits = torch.mm(anchors, neg_pool.t()) / temp
             all_logits = torch.cat([pos_logits, neg_logits], dim=1)
             return -F.log_softmax(all_logits, dim=1)[:, 0].mean()
 
-        total_loss = 0
-        
-        # 1. Neighbor Loss (View1 vs View1)
+        # 1. Neighbor Loss Only
         loss_structure_user = 0
         loss_structure_item = 0
         
@@ -148,30 +148,8 @@ class MSBEGCL(GraphRecommender):
                 item_view_1[torch.LongTensor(i_batch).cuda()]
             )
             
-        # 2. Self-SimGCL Loss (View1 vs View2)
-        loss_noise_user = 0
-        loss_noise_item = 0
-        
-        if u_anc_self:
-            idx_anc = torch.LongTensor(u_anc_self).cuda()
-            loss_noise_user = batch_nce(
-                user_view_1[idx_anc], 
-                user_view_2[idx_anc], 
-                user_view_2[torch.LongTensor(u_batch).cuda()]
-            )
-        if i_anc_self:
-            idx_anc = torch.LongTensor(i_anc_self).cuda()
-            loss_noise_item = batch_nce(
-                item_view_1[idx_anc], 
-                item_view_2[idx_anc], 
-                item_view_2[torch.LongTensor(i_batch).cuda()]
-            )
-            
-        # Apply Alpha: L_user + alpha * L_item
-        total_structure = loss_structure_user + self.alpha * loss_structure_item
-        total_noise = loss_noise_user + self.alpha * loss_noise_item
-        
-        return total_structure + total_noise
+        # Apply Alpha
+        return loss_structure_user + self.alpha * loss_structure_item
 
     def save(self):
         with torch.no_grad():
