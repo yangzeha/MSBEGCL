@@ -16,7 +16,7 @@ reg.lambda: 0.0001
 MSBEGCL:
   n_layer: 2
   lambda: 0.5      # Weight for SimGCL noise contrastive loss
-  gamma: 0.000001   # Weight for MSBE structural contrastive loss (1e-6 as requested)
+  gamma: 0.01      # Weight for MSBE structural contrastive loss
   alpha: 1.0       # Weight for Item CL in structural loss (User_CL + alpha * Item_CL)
   eps: 0.1         # Noise eps for SimGCL
   biclique.file: ./dataset/yelp2018/bicliques.txt # Biclique file path (required by config loader)
