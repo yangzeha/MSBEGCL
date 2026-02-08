@@ -26,12 +26,15 @@ class MSBEGCL(GraphRecommender):
             self.data.item_num
         )
         
+        # Sim Threshold from config (default 0.1 if missing)
+        self.sim_threshold = float(args.get('sim_threshold', 0.1))
+        
         self.user_neighbors, self.item_neighbors = load_msbe_neighbors(
             self.biclique_file,
             self.data.user,
             self.data.item,
             self.data.interaction_mat,
-            self.eps
+            self.sim_threshold
         )
         
         self.model = MSBEGCL_Encoder(

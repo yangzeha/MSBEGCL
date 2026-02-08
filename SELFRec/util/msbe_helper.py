@@ -1,171 +1,84 @@
-
-import os
+﻿import os
 import numpy as np
 import scipy.sparse as sp
 
 def load_msbe_adj(file_path, user_map, item_map, user_num, item_num):
     """
-    Load bicliques from file and construct a sparse adjacency matrix.
-    File format expected:
-    user_id1 user_id2 ... | item_id1 item_id2 ...
-    or
-    u1,u2...:i1,i2...
+    Deprecated / Dummy function to satisfy interface.
+    No Biclique Structure aggregation (GLSCL style).
     """
-    if not os.path.exists(file_path):
-        print(f"Warning: Biclique file not found at {file_path}. Structural CL will be disabled.")
-        # Return empty matrix to allow running without the file
-        return sp.csr_matrix((user_num + item_num, user_num + item_num))
+    return sp.csr_matrix((user_num + item_num, user_num + item_num))
 
-    rows = []
-    cols = []
-    
-    print(f"Loading bicliques from {file_path}...")
-    
-    count = 0
-    with open(file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            
-            if '|' in line:
-                parts = line.split('|')
-            elif ':' in line:
-                parts = line.split(':')
-            else:
-                continue
-                
-            if len(parts) != 2:
-                continue
-                
-            u_part = parts[0].strip().split()
-            i_part = parts[1].strip().split()
-            
-            u_ids = [user_map.get(u) for u in u_part if u in user_map]
-            i_ids = [item_map.get(i) for i in i_part if i in item_map]
-            
-            if not u_ids or not i_ids:
-                continue
-            
-            for u in u_ids:
-                for i in i_ids:
-                    rows.append(u)
-                    cols.append(i + user_num)
-                    rows.append(i + user_num)
-                    cols.append(u)
-            
-            count += 1
-            
-    print(f"Loaded {count} bicliques.")
-    
-    data = np.ones(len(rows))
-    adj = sp.csr_matrix((data, (rows, cols)), shape=(user_num + item_num, user_num + item_num))
-    
-    # Normalize
-    adj.data = np.ones_like(adj.data)
-    rowsum = np.array(adj.sum(1))
-    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
-    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
-    d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
-    norm_adj = d_mat_inv_sqrt.dot(adj).dot(d_mat_inv_sqrt)
-    
-    return norm_adj
-
-    def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None, sim_threshold=0.1):
+def load_msbe_neighbors(file_path, user_map, item_map, interaction_mat=None, sim_threshold=0.1):
     """
-    Load neighbors from Maximal Similar Bicliques (MSBE).
-    Constraint: Candidates must be from the same Biclique.
-    Selection: Top-1 neighbor with highest Cosine Similarity (Interaction-based).
-    Fallback: If max similarity < threshold, no neighbor is returned (model handles fallback).
+    Compute Global Top-1 Similarity Neighbors.
+    Ignores strict biclique structure as requested.
+    Uses Sparse Matrix Multiplication batch-wise for global similarity search.
     
-    Args:
-        file_path: Path to bicliques.txt
-        interaction_mat: User-Item sparse matrix (for similarity calculation)
-        sim_threshold: Filtering threshold
+    Returns:
+        user_neighbors: {user_id: [neighbor_id]}
+        item_neighbors: {item_id: [neighbor_id]}
     """
-    if not os.path.exists(file_path):
+    print(f'Calculating Global Top-1 Neighbors (Threshold={sim_threshold})...')
+    
+    if interaction_mat is None:
+        print('Error: interaction_mat required for global similarity.')
         return {}, {}
-    
-    print(f"Loading MSBE neighbors from {file_path} (Threshold={sim_threshold})...")
-    
-    # 1. Parse Bicliques into Clusters
-    # User said: "User will only appear in one maximal similar biclique"
-    user_clusters = [] # List of lists of user IDs
-    item_clusters = [] # List of lists of item IDs
-    
-    with open(file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line: continue
-            if '|' in line: parts = line.split('|')
-            elif ':' in line: parts = line.split(':')
-            else: continue
-            if len(parts) != 2: continue
-            
-            u_part = parts[0].strip().split()
-            i_part = parts[1].strip().split()
-            
-            u_ids = [user_map.get(u) for u in u_part if u in user_map]
-            i_ids = [item_map.get(i) for i in i_part if i in item_map]
-            
-            if len(u_ids) > 1: user_clusters.append(u_ids)
-            if len(i_ids) > 1: item_clusters.append(i_ids)
-
-    # 2. Process Clusters: Find best neighbor within cluster
-    print(f"Processing {len(user_clusters)} user clusters and {len(item_clusters)} item clusters...")
-    
-    def process_clusters(clusters, mat, transpose=False):
-        final_neighbors = {}
-        target_mat = mat.T if transpose else mat
-        target_mat = target_mat.tocsr()
         
-        # Pre-compute row norms
-        row_sums = np.array(target_mat.power(2).sum(axis=1)).flatten()
+    def get_global_top1(mat, threshold):
+        # Normalize rows
+        mat = mat.tocsr()
+        row_sums = np.array(mat.power(2).sum(axis=1)).flatten()
         row_norms = np.sqrt(row_sums)
         row_norms[row_norms == 0] = 1.0
-        
-        # Diagonal norm matrix
         diag_norm = sp.diags(1.0 / row_norms)
-        norm_mat = diag_norm.dot(target_mat)
+        norm_mat = diag_norm.dot(mat)
         
-        processed_count = 0
+        num_nodes = norm_mat.shape[0]
+        neighbors = {}
         
-        for cluster in clusters:
-            if len(cluster) < 2: continue
+        # Batch processing with Sparse Matrix Multiplication
+        # Tune batch_size based on memory. 2000 is usually safe.
+        batch_size = 2000 
+        
+        for start_idx in range(0, num_nodes, batch_size):
+            end_idx = min(start_idx + batch_size, num_nodes)
             
-            # Extract sub-matrix for this cluster
-            # (K x F)
-            cluster_mat = norm_mat[cluster] 
+            # Batch: (B, F)
+            batch_mat = norm_mat[start_idx:end_idx]
             
-            # Compute similarity block: K x K
-            # dense is fine for small clusters (e.g. < 1000)
-            sim_block = cluster_mat.dot(cluster_mat.T).toarray()
+            # Sim: (B, N)
+            sim_batch = batch_mat.dot(norm_mat.T)
             
-            # For each node in cluster, find max in same row (excluding self)
-            for idx, node_id in enumerate(cluster):
-                # Row in sim_block
-                row_sims = sim_block[idx]
-                
-                # Mask self
-                row_sims[idx] = -1.0
-                
-                # Find max
-                best_local_idx = np.argmax(row_sims)
-                best_sim = row_sims[best_local_idx]
-                
-                if best_sim >= sim_threshold:
-                    best_neighbor_id = cluster[best_local_idx]
-                    final_neighbors[node_id] = [best_neighbor_id]
+            # Convert to dense to find max
+            sim_dense = sim_batch.toarray()
             
-            processed_count += 1
-            if processed_count % 1000 == 0:
-                print(f"  Processed {processed_count} clusters...")
+            # Mask self
+            for i in range(len(sim_dense)):
+                global_id = start_idx + i
+                sim_dense[i, global_id] = -1.0
+            
+            # Find max
+            max_indices = np.argmax(sim_dense, axis=1)
+            max_values = np.max(sim_dense, axis=1)
+            
+            for i in range(len(sim_dense)):
+                if max_values[i] > threshold:
+                    global_u = start_idx + i
+                    best_n = max_indices[i]
+                    neighbors[global_u] = [int(best_n)]
+                    
+            if (start_idx // batch_size) % 5 == 0:
+                print(f'Processed {end_idx}/{num_nodes} nodes...')
                 
-        return final_neighbors
+        return neighbors
 
-    user_neighbors = process_clusters(user_clusters, interaction_mat, transpose=False)
-    item_neighbors = process_clusters(item_clusters, interaction_mat, transpose=True)
+    # User Neighbors
+    user_neighbors = get_global_top1(interaction_mat, sim_threshold)
+    print(f'Found {len(user_neighbors)} users with similar neighbors > {sim_threshold}')
     
-    print(f"MSBE Neighbor Search complete. Found neighbors for {len(user_neighbors)} users and {len(item_neighbors)} items.")
+    # Item Neighbors
+    item_neighbors = get_global_top1(interaction_mat.T, sim_threshold)
+    print(f'Found {len(item_neighbors)} items with similar neighbors > {sim_threshold}')
+    
     return user_neighbors, item_neighbors
-
