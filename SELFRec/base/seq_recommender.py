@@ -33,9 +33,7 @@ class SequentialRecommender(Recommender):
 
     def test(self):
         def process_bar(num, total):
-            rate = float(num) / total
-            ratenum = int(50 * rate)
-            print(f'\rProgress: [{"+" * ratenum}{" " * (50 - ratenum)}]{ratenum * 2}%', end='', flush=True)
+            pass
 
         rec_list = {}
         for n, batch in enumerate(next_batch_sequence_for_test(self.data, self.batch_size, max_len=self.max_len)):
