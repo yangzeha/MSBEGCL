@@ -1,5 +1,4 @@
-﻿import os
-import torch
+﻿import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from base.graph_recommender import GraphRecommender
@@ -9,53 +8,90 @@ from util.loss_torch import bpr_loss, l2_reg_loss
 import random
 import numpy as np
 import scipy.sparse as sp
-from util.msbe_helper import load_msbe_neighbors
+import os
 
 class MSBEGCL(GraphRecommender):
     def __init__(self, conf, training_set, test_set):
         super(MSBEGCL, self).__init__(conf, training_set, test_set)
-        args = self.config['MSBEGCL']
         
-        # --- 超参数配置 ---
-        self.cl_rate = float(args.get('lambda', 0.15))       # SimGCL (Uniformity)
-        self.glscl_rate = float(args.get('gamma', 0.1))      # GLSCL (Local Similarity)
-        self.lgcl_rate = float(args.get('lgcl_lambda', 0.2)) # LightGCL (Global Denoising)
+        # [Device Safe]
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"--- MSBEGCL IS USING DEVICE: {self.device} ---") 
+        
+        if not self.config.contain('MSBEGCL'):
+            print("WARNING: MSBEGCL config section not found! Using hardcoded defaults.")
+            args = {'n_layer': 2, 'lambda': 0.2, 'lgcl_lambda': 0.2, 'gamma': 0.1, 'eps': 0.1, 'tau': 0.2, 'biclique.file': ''}
+        else:
+            args = self.config['MSBEGCL']
+        
+        #参数获取
+        self.cl_rate = float(args.get('lambda', 0.2))      # SimGCL
+        self.lgcl_rate = float(args.get('lgcl_lambda', 0.2)) # LightGCL (SVD)
+        self.glscl_rate = float(args.get('gamma', 0.1))    # GLSCL (Local Similarity)
         self.eps = float(args.get('eps', 0.1))
         self.n_layers = int(args.get('n_layer', 2))
         self.tau = float(args.get('tau', 0.2))
-        self.svd_q = int(args.get('svd_q', 5))
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # --- 1. LightGCL 核心：计算低秩 SVD (全局建模) ---
+        
+        # 1. LightGCL 核心：预计算 SVD
+        print("Pre-computing SVD for LightGCL...")
         adj = self.data.interaction_mat
-        print(f"--- Computing SVD for LightGCL (q={self.svd_q}) ---")
-        u, s, v = self._compute_svd(adj, q=self.svd_q)
-        svd_dict = {
-            'u': u.to(self.device), 
-            's': s.to(self.device), 
-            'v': v.to(self.device)
-        }
+        # Convert to float for SVD
+        adj_float = adj.astype(float)
+        u, s, v = torch.svd_lowrank(self._to_torch_sparse(adj_float), q=int(args.get('svd_q', 5)))
+        svd_dict = {'u': u, 's': s, 'v': v}
+        print("SVD computation complete.")
 
-        # 初始化 Encoder
         self.model = MSBEGCL_Encoder(self.data, self.emb_size, self.eps, self.n_layers, svd_dict, self.device)
         
-        # --- 2. GLSCL 核心：加载同质相似邻居 (Biclique 挖掘) ---
-        self.user_msb, self.item_msb = load_msbe_neighbors(
-            args['biclique.file'], 
-            self.data.user, 
-            self.data.item, 
-            self.data.interaction_mat, 
-            float(args.get('sim_threshold', 0.2))
-        )
+        # 2. GLSCL 核心：加载同质相似邻居
+        self.biclique_file = args.get('biclique.file', '')
+        self.user_sim_neighbors, self.item_sim_neighbors = self._load_neighbors(self.biclique_file)
 
-    def _compute_svd(self, adj, q=5):
-        coo = adj.tocoo()
+    def _to_torch_sparse(self, mat):
+        coo = mat.tocoo()
         indices = torch.LongTensor([coo.row, coo.col])
         values = torch.from_numpy(coo.data).float()
-        t = torch.sparse.FloatTensor(indices, values, coo.shape).to(self.device)
-        # 使用低秩 SVD 提取全局结构
-        u, s, v = torch.svd_lowrank(t, q=q)
-        return u, s, v
+        return torch.sparse.FloatTensor(indices, values, coo.shape).to(self.device)
+
+    def _load_neighbors(self, file_path):
+        user_dict, item_dict = {}, {}
+        if not os.path.exists(file_path):
+            print(f"!!! CRITICAL WARNING: {file_path} NOT FOUND. GLSCL WILL NOT WORK !!!")
+            return user_dict, item_dict
+        
+        print(f"Loading bicliques from {file_path}")
+        count = 0
+        with open(file_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split('|')
+                if len(parts) < 2: continue
+                # Parse users and items
+                users = parts[0].strip().split()
+                items = parts[1].strip().split()
+                
+                try:
+                    user_ids = [self.data.get_user_id(u) for u in users if u in self.data.user]
+                    item_ids = [self.data.get_item_id(i) for i in items if i in self.data.item]
+                    
+                    # GLSCL logic: Users in same biclique are similar to each other
+                    # Items in same biclique are similar to each other
+                    if len(user_ids) > 1:
+                        for u in user_ids:
+                            if u not in user_dict: user_dict[u] = []
+                            # Add other users in biclique
+                            user_dict[u].extend([x for x in user_ids if x != u])
+                            
+                    if len(item_ids) > 1:
+                        for i in item_ids:
+                            if i not in item_dict: item_dict[i] = []
+                            item_dict[i].extend([x for x in item_ids if x != i])
+                    
+                    count += 1
+                except Exception as e:
+                    continue
+
+        print(f"--- Loaded {count} bicliques. Users with neighbors: {len(user_dict)}, Items with neighbors: {len(item_dict)} ---")
+        return user_dict, item_dict
 
     def info_nce(self, view1, view2):
         view1, view2 = F.normalize(view1, dim=1), F.normalize(view2, dim=1)
@@ -63,27 +99,29 @@ class MSBEGCL(GraphRecommender):
         ttl_score = torch.exp(torch.matmul(view1, view2.t()) / self.tau).sum(dim=1)
         return -torch.log(pos_score / (ttl_score + 1e-8) + 1e-8).mean()
 
-    # --- GLSCL 思想：局部同质对比损失 ---
-    def local_sim_loss(self, nodes, neighbor_dict, embeddings):
-        """
-        GLSCL: 将具有相同局部结构（Biclique）的同质节点拉近。
-        """
-        if len(nodes) == 0: return 0.0
-        node_list = nodes.cpu().tolist()
+    def glscl_loss(self, nodes, neighbor_dict, embs):
+        """ GLSCL 核心思想：对比同质节点（User-User, Item-Item）的局部相似性 """
+        valid_nodes = []
         pos_neighbors = []
-        valid_idx = []
-        for i, node in enumerate(node_list):
+        
+        nodes_list = nodes.cpu().tolist()
+        for node in nodes_list:
             if node in neighbor_dict and neighbor_dict[node]:
-                # 随机选一个挖掘出的相似邻居作为正样本
+                valid_nodes.append(node)
                 pos_neighbors.append(random.choice(neighbor_dict[node]))
-                valid_idx.append(i)
-        if not valid_idx: return 0.0
         
-        anchor_embs = F.normalize(embeddings[nodes[valid_idx]], dim=1)
-        neighbor_embs = F.normalize(embeddings[torch.tensor(pos_neighbors).to(self.device)], dim=1)
+        if not valid_nodes: return torch.tensor(0.0).to(self.device)
         
-        pos_score = torch.exp(torch.sum(anchor_embs * neighbor_embs, dim=1) / self.tau)
-        ttl_score = torch.exp(torch.matmul(anchor_embs, anchor_embs.T) / self.tau).sum(dim=1)
+        anchor = F.normalize(embs[torch.tensor(valid_nodes).to(self.device)], dim=1)
+        positive = F.normalize(embs[torch.tensor(pos_neighbors).to(self.device)], dim=1)
+        
+        pos_score = torch.exp(torch.sum(anchor * positive, dim=1) / self.tau)
+        
+        # Denominator: Contrast with other anchors in the batch? 
+        # Or contrast with other nodes?
+        # Standard InfoNCE usually contrasts with batch negatives.
+        # Here we can contrast anchor with other anchors.
+        ttl_score = torch.exp(torch.matmul(anchor, anchor.T) / self.tau).sum(dim=1)
         return -torch.log(pos_score / (ttl_score + 1e-8) + 1e-8).mean()
 
     def train(self):
@@ -91,47 +129,68 @@ class MSBEGCL(GraphRecommender):
         optimizer = torch.optim.Adam(model.parameters(), lr=self.lRate)
         
         for epoch in range(self.maxEpoch):
+            epoch_loss = 0
+            epoch_rec = 0
+            epoch_sim = 0
+            epoch_light = 0
+            epoch_glscl = 0
+            batch_count = 0
+            
             for n, batch in enumerate(next_batch_pairwise(self.data, self.batch_size)):
-                user_idx, pos_idx, neg_idx = batch
-                u_unique = torch.unique(torch.tensor(user_idx).to(self.device))
-                i_unique = torch.unique(torch.tensor(pos_idx).to(self.device))
+                u_idx, p_idx, n_idx = batch
+                u_unique = torch.unique(torch.tensor(u_idx).to(self.device))
+                i_unique = torch.unique(torch.tensor(p_idx).to(self.device))
                 
-                # 1. Forward + 获取 SVD 增强视图
+                # Forward
                 rec_u, rec_i, g_u_l, g_i_l, z_u_l, z_i_l = model(return_svd=True)
                 
-                # 2. 主损失：BPR Loss
-                l_main = bpr_loss(rec_u[user_idx], rec_i[pos_idx], rec_i[neg_idx])
+                # 1. BPR Loss
+                l_main = bpr_loss(rec_u[u_idx], rec_i[p_idx], rec_i[n_idx])
                 
-                # 3. SimGCL Loss：均匀性对比
+                # 2. SimGCL (Uniformity)
                 u_v1, i_v1 = model(perturbed=True)
                 u_v2, i_v2 = model(perturbed=True)
-                l_unif = self.cl_rate * (self.info_nce(u_v1[u_unique], u_v2[u_unique]) + 
+                l_sim = self.cl_rate * (self.info_nce(u_v1[u_unique], u_v2[u_unique]) + 
                                        self.info_nce(i_v1[i_unique], i_v2[i_unique]))
 
-                # 4. LightGCL Loss：全局降噪对比 (对齐 GNN 和 SVD 视图)
-                l_lgcl = 0
+                # 3. LightGCL (Global SVD Alignment)
+                l_light = torch.tensor(0.0).to(self.device)
                 for l in range(self.n_layers):
-                    l_lgcl += self.info_nce(z_u_l[l][u_unique], g_u_l[l][u_unique])
-                    l_lgcl += self.info_nce(z_i_l[l][i_unique], g_i_l[l][i_unique])
-                l_lgcl *= self.lgcl_rate
+                    l_light += self.info_nce(z_u_l[l][u_unique], g_u_l[l][u_unique])
+                    l_light += self.info_nce(z_i_l[l][i_unique], g_i_l[l][i_unique])
+                l_light *= self.lgcl_rate
 
-                # 5. GLSCL Loss：局部结构相似性对比
-                l_local = self.glscl_rate * (self.local_sim_loss(u_unique, self.user_msb, rec_u) + 
-                                           self.local_sim_loss(i_unique, self.item_msb, rec_i))
+                # 4. GLSCL (Local Homogeneous Similarity)
+                l_glscl = self.glscl_rate * (self.glscl_loss(u_unique, self.user_sim_neighbors, rec_u) + 
+                                           self.glscl_loss(i_unique, self.item_sim_neighbors, rec_i))
 
-                total_loss = l_main + l_unif + l_lgcl + l_local + l2_reg_loss(self.reg, rec_u[user_idx], rec_i[pos_idx], rec_i[neg_idx])
+                total_loss = l_main + l_sim + l_light + l_glscl + l2_reg_loss(self.reg, rec_u[u_idx], rec_i[p_idx], rec_i[n_idx])
                 
                 optimizer.zero_grad()
                 total_loss.backward()
                 optimizer.step()
+
+                epoch_loss += total_loss.item()
+                epoch_rec += l_main.item()
+                epoch_sim += l_sim.item()
+                epoch_light += l_light.item()
+                epoch_glscl += l_glscl.item()
+                batch_count += 1
             
+            print(f'Epoch {epoch} Loss={epoch_loss/batch_count:.4f} Rec={epoch_rec/batch_count:.4f} Sim={epoch_sim/batch_count:.4f} Light={epoch_light/batch_count:.4f} GLSCL={epoch_glscl/batch_count:.4f}')
+
             with torch.no_grad():
                 self.user_emb, self.item_emb = self.model()
             self.fast_evaluation(epoch)
 
+    def save(self):
+        with torch.no_grad():
+            self.best_user_emb, self.best_item_emb = self.model(perturbed=False)
+            
     def predict(self, u):
         u = self.data.get_user_id(u)
-        return torch.matmul(self.user_emb[u], self.item_emb.T).cpu().numpy()
+        score = torch.matmul(self.user_emb[u], self.item_emb.transpose(0, 1))
+        return score.cpu().numpy()
 
 class MSBEGCL_Encoder(nn.Module):
     def __init__(self, data, emb_size, eps, n_layers, svd_dict, device):
@@ -142,10 +201,11 @@ class MSBEGCL_Encoder(nn.Module):
             'user_emb': nn.Parameter(nn.init.xavier_uniform_(torch.empty(data.user_num, emb_size))),
             'item_emb': nn.Parameter(nn.init.xavier_uniform_(torch.empty(data.item_num, emb_size))),
         })
-        # LightGCL SVD 预计算组件
+        # LightGCL: SVD components
+        # svd_dict['u']: (N, q), svd_dict['s']: (q,)
         self.u_mul_s = svd_dict['u'] @ torch.diag(svd_dict['s'])
         self.v_mul_s = svd_dict['v'] @ torch.diag(svd_dict['s'])
-        self.ut, self.vt = svd_dict['u'].T, svd_dict['v'].T
+        self.ut, self.vt = svd_dict['u'].t(), svd_dict['v'].t()
 
     def forward(self, perturbed=False, return_svd=False):
         ego = torch.cat([self.embedding_dict['user_emb'], self.embedding_dict['item_emb']], 0)
@@ -154,7 +214,6 @@ class MSBEGCL_Encoder(nn.Module):
 
         for k in range(self.n_layers):
             if return_svd:
-                # 提取 LightGCL 奇异值过滤视图
                 eu, ei = torch.split(ego, [self.data.user_num, self.data.item_num])
                 g_u_l.append(self.u_mul_s @ (self.vt @ ei))
                 g_i_l.append(self.v_mul_s @ (self.ut @ eu))
@@ -162,17 +221,17 @@ class MSBEGCL_Encoder(nn.Module):
             ego = torch.sparse.mm(self.sparse_norm_adj, ego)
             
             if return_svd:
-                # 提取原始 GNN 视图用于对比
                 zu, zi = torch.split(ego, [self.data.user_num, self.data.item_num])
                 z_u_l.append(zu); z_i_l.append(zi)
 
             if perturbed:
-                # SimGCL 随机噪声扰动
-                noise = torch.rand_like(ego).to(self.device)
-                ego += torch.sign(ego) * F.normalize(noise, dim=-1) * self.eps
+                random_noise = torch.rand_like(ego).to(self.device)
+                ego += torch.sign(ego) * F.normalize(random_noise, dim=-1) * self.eps
             all_embs.append(ego)
 
-        avg_emb = torch.mean(torch.stack(all_embs, dim=1), dim=1)
-        res_u, res_i = torch.split(avg_emb, [self.data.user_num, self.data.item_num])
+        all_embs = torch.stack(all_embs, dim=1)
+        all_embs = torch.mean(all_embs, dim=1)
+        res_u, res_i = torch.split(all_embs, [self.data.user_num, self.data.item_num])
+        
         if return_svd: return res_u, res_i, g_u_l, g_i_l, z_u_l, z_i_l
         return res_u, res_i
