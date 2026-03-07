@@ -1493,13 +1493,7 @@ void init_hash()
     sup = new unordered_map<ui, int>[n1];
     edel = new unordered_map<ui, bool>[n1];
     esign = new unordered_map<ui, bool>[n1];
-    /*
-    for(ui i = 0; i < n1; i++){
-        sup[i].set_empty_key(INF);
-        edel[i].set_empty_key(INF);
-        esign[i].set_empty_key(INF);
-    }
-    */
+    
     for(ui i = 0; i < n1; i++){
         for(ui j = pstart[i]; j < pstart[i+1]; j++){
             ui v = edges[j];
