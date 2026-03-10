@@ -161,6 +161,7 @@ class MSBEGCL(GraphRecommender):
                 l_light *= self.lgcl_rate
 
                 # 4. GLSCL (Local Homogeneous Similarity)
+                l_glscl = torch.tensor(0.0).to(self.device)
                 l_glscl = self.glscl_rate * (self.glscl_loss(u_unique, self.user_sim_neighbors, rec_u) + 
                                            self.glscl_loss(i_unique, self.item_sim_neighbors, rec_i))
 

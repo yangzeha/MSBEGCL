@@ -1,6 +1,20 @@
+import os
+import random
+import numpy as np
+import torch
 from SELFRec import SELFRec
 from util.conf import ModelConf
 import time
+
+# ---------- 新增：从环境变量读取种子并固定所有随机源 ----------
+seed = int(os.environ.get('FIXED_SEED', 2024))
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+# ------------------------------------------------------------
 
 def print_models(title, models):
     print(f"{'=' * 80}\n{title}\n{'-' * 80}")
