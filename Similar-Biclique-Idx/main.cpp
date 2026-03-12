@@ -76,9 +76,9 @@ int * deg_inCR;
 int skipped_dom_ver;
 int total_ver;
 
-unordered_map<ui, int> * sup; //butterfly count
-unordered_map<ui, bool> * edel; //0:exist, 1:deleted
-unordered_map<ui, bool> * esign; //exist
+dense_hash_map<ui, int> * sup; //butterfly count
+dense_hash_map<ui, bool> * edel; //0:exist, 1:deleted
+dense_hash_map<ui, bool> * esign; //exist
 
 int vr_way;
 int update_type;
@@ -1490,10 +1490,14 @@ void index_vr_opt2()
 
 void init_hash()
 {
-    sup = new unordered_map<ui, int>[n1];
-    edel = new unordered_map<ui, bool>[n1];
-    esign = new unordered_map<ui, bool>[n1];
-    
+    sup = new dense_hash_map<ui, int>[n1];
+    edel = new dense_hash_map<ui, bool>[n1];
+    esign = new dense_hash_map<ui, bool>[n1];
+    for(ui i = 0; i < n1; i++){
+        sup[i].set_empty_key(INF);
+        edel[i].set_empty_key(INF);
+        esign[i].set_empty_key(INF);
+    }
     for(ui i = 0; i < n1; i++){
         for(ui j = pstart[i]; j < pstart[i+1]; j++){
             ui v = edges[j];

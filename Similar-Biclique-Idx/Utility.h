@@ -29,6 +29,7 @@
 #include <algorithm>
 //#define NDEBUG
 #include <assert.h>
+#include <sparsehash/dense_hash_map>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -37,6 +38,7 @@
 #include <iomanip>
 
 using namespace std;
+using namespace google;
 
 typedef unsigned int ui;
 const int INF = 1000000000;

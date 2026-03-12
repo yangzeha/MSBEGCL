@@ -37,7 +37,9 @@ class GraphRecommender(Recommender):
 
     def test(self):
         def process_bar(num, total):
-            pass
+            rate = float(num) / total
+            ratenum = int(50 * rate)
+            print(f'\rProgress: [{"+" * ratenum}{" " * (50 - ratenum)}]{ratenum * 2}%', end='', flush=True)
 
         rec_list = {}
         user_count = len(self.data.test_set)
